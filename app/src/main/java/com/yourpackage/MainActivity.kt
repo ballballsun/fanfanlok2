@@ -1,4 +1,4 @@
-package com.yourpackage
+package com.example.fanfanlok
 
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
