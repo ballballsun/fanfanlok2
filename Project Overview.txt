@@ -1,0 +1,53 @@
+1. Project Overview
+You’re developing a specialized Android app that runs as an overlay on top of an existing memory matching card game (third-party, closed app). The goal is to fully automate gameplay by recognizing cards and simulating touch input to complete the game—ideally within one minute. This project is targeted for your personal use, so device compatibility is not a primary concern.
+2. Key Features & Workflow
+A. Overlay and User Interaction
+    •   The app uses an Android floating overlay UI (“display over other apps” permission) that sits on top of the game.
+    •   Users control automation with a simple overlay button—allowing manual start/stop of automation at any point during gameplay.
+B. Screen Capture and Card Recognition
+    •   The app leverages the MediaProjection API for real-time screen capturing. This prevents UI obfuscation issues common with Accessibility Services in games.
+    •   For card recognition:
+    •   Template Matching is the preferred approach for speed and accuracy because you know all possible card faces in advance.
+    •   You provide a complete set of reference card images for matching.
+    •   As an alternative, ML Kit or TensorFlow Lite may be explored for faster, model-based recognition if template matching proves too slow (not expected, but optional).
+    •   The app automatically detects which cards are currently revealed (face up), their positions, and tracks the memory state of all discovered cards.
+C. Automated Gameplay (Input Simulation)
+    •   Once card states and positions are recognized, the app computes the next optimal move(s) using standard memory game matching logic.
+    •   Touch events are simulated using Accessibility Services, which can perform global touch actions at arbitrary screen coordinates (assuming correct permissions are granted).
+    •   The app will automate all card flips and matches until the entire board is completed—no human input required after starting the task.
+D. Speed & Performance
+    •   Recognition and interaction are optimized for completion within a 1-minute time limit:
+    •   Lightweight image processing (e.g., resizing screenshots, limiting template search regions) is applied.
+    •   All operations are tuned for minimal latency between recognition, decision, and input action.
+E. Security and Privacy
+    •   Because sensitive permissions are required (screen capture, overlay, accessibility), permissions must be manually enabled during setup.
+    •   All processing happens on-device for privacy and security; no data is uploaded off device.
+    
+3. Technologies and Android Features Used
+Task    | Android Feature/Library
+Overlay/Floating Button | Overlay API, SYSTEM_ALERT_WINDOW permission
+Screen Capture  | MediaProjection API
+Image/Card Recognition  | OpenCV (template matching), ML Kit, TF Lite (opt)
+Auto-Tapping/Input Simulation   | Accessibility Service (performGlobalAction)
+User Interaction for Start/Stop | Custom Overlay UI Widget/Button
+
+
+4. Customization and Game-Specific Logic
+    •   All logic—the grid layout, card locations, screenshot regions, and reference card images—are customized specifically for the target game title you wish to automate.
+    •   No support for general card games is needed, allowing for hardcoded board positions and recognition logic.
+5. Example Workflow
+    1.  Open the target card-matching game.
+    2.  Activate your app’s floating overlay control and press “Start.”
+    3.  The app performs:
+    •   Continuous screen capture,
+    •   Fast template matching to extract card flip states/positions,
+    •   Maintains a “memory map” of flipped cards,
+    •   Decides the next match based on revealed cards,
+    •   Simulates touch/tap input via Accessibility at the correct coordinates,
+    •   Repeats until all matches are found and the game is finished.
+    4.  User can stop automation via the overlay at any time.
+6. Implementation Tips
+    •   Prepare clear, high-quality images of all possible cards in the game for template matching.
+    •   Fine-tune speed by reducing recognition area to specific regions (if the board layout is always fixed).
+    •   Debug and test on your device only, as broader device compatibility is not a requirement.
+    •   Strictly control all permissions for safety and privacy; you must manually approve screen capture and accessibility access.
