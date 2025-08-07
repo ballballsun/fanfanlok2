@@ -1,4 +1,4 @@
-package com.yourpackage
+package com.example.fanfanlok
 
 import android.util.Log
 import org.opencv.core.Rect

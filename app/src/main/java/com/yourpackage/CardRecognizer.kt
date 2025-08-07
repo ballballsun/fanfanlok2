@@ -1,4 +1,4 @@
-package com.yourpackage
+package com.example.fanfanlok
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -36,9 +36,8 @@ class CardRecognizer(private val templates: List<Mat>) {
 
             // Template Matching
             Imgproc.matchTemplate(imgMat, template, result, TM_CCOEFF_NORMED)
-            Core.MinMaxLocResult().also { mmr ->
-                Core.minMaxLoc(result, mmr)
-                if (mmr.maxVal >= matchThreshold) {
+            val mmr = Core.minMaxLoc(result)
+            if (mmr.maxVal >= matchThreshold) {
                     val matchLoc = mmr.maxLoc
                     results.add(
                         DetectedCard(
@@ -52,7 +51,6 @@ class CardRecognizer(private val templates: List<Mat>) {
                         )
                     )
                     // Optional: To avoid multiple detections of the same card, you could mask matched region here
-                }
             }
             result.release()
         }

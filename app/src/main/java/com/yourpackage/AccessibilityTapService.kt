@@ -1,4 +1,4 @@
-package com.yourpackage
+package com.example.fanfanlok
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
