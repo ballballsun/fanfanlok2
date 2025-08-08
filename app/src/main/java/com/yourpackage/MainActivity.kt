@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnRequestScreenCapture: Button
     private lateinit var btnStartAutomation: Button
     private lateinit var btnStopAutomation: Button
+    private lateinit var btnSetting: Button
 
     // Services and managers
     private lateinit var mediaProjectionManager: MediaProjectionManager
@@ -104,6 +105,7 @@ class MainActivity : AppCompatActivity() {
         btnRequestScreenCapture = findViewById(R.id.btn_request_screen_capture)
         btnStartAutomation = findViewById(R.id.btn_start_automation)
         btnStopAutomation = findViewById(R.id.btn_stop_automation)
+        btnSetting = findViewById(R.id.btn_setting)
     }
 
     private fun initializeServices() {
@@ -129,6 +131,10 @@ class MainActivity : AppCompatActivity() {
 
         btnStopAutomation.setOnClickListener {
             stopAutomation()
+        }
+
+        btnSetting.setOnClickListener {
+            openSettings()
         }
     }
 
