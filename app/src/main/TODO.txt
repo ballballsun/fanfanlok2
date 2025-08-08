@@ -1,0 +1,27 @@
+app/build.gradle
+========= BEGIN =========
+dependencies {
+    // OpenCV for image processing
+    implementation 'org.opencv:opencv-android:4.5.5'
+    
+    // Kotlinx serialization for position caching
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.5.0'
+    
+    // Existing dependencies...
+}
+
+// Enable serialization
+apply plugin: 'kotlinx-serialization'
+
+========= END =========
+
+
+
+R.layout.activity_main
+========= BEGIN =========
+ // Add settings button to your MainActivity
+private private fun fun openSettings openSettings( () ) { {
+val val intent intent = = Intent Intent( (this this, , SettingsActivity SettingsActivity:: ::class class. .java java) )
+startActivity startActivity( (intent intent) )
+} }
+========= END =========

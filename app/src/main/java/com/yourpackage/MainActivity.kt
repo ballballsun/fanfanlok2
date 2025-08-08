@@ -205,6 +205,11 @@ class MainActivity : AppCompatActivity() {
         updateUI()
     }
 
+    private fun openSettings() {
+        val intent = Intent(this, SettingsActivity::class.java)
+        startActivity(intent)
+    }
+
     private fun areAllPermissionsGranted(): Boolean {
         return Settings.canDrawOverlays(this) &&
                 isAccessibilityServiceEnabled() &&
