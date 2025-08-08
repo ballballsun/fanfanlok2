@@ -1,5 +1,7 @@
 package com.example.fanfanlok
 
+import android.os.Parcel
+import android.os.Parcelable
 import android.util.Log
 import org.opencv.core.Rect
 
@@ -44,17 +46,17 @@ class MatchLogic {
                     // New card discovered
                     cardMemory[card.position] = newState
                     updates.add(StateChange.CARD_DISCOVERED(card.position, newState))
-                    
+
                     if (card.isFaceUp) {
                         newlyRevealed.add(card)
                         addToRevealedPairs(card.templateIndex, card.position)
                     }
                 }
-                
+
                 previousState.isFaceUp != card.isFaceUp -> {
                     // Card flipped
                     cardMemory[card.position] = newState
-                    
+
                     if (card.isFaceUp) {
                         newlyRevealed.add(card)
                         addToRevealedPairs(card.templateIndex, card.position)
@@ -65,7 +67,7 @@ class MatchLogic {
                         updates.add(StateChange.CARD_FLIPPED_DOWN(card.position))
                     }
                 }
-                
+
                 else -> {
                     // Update last seen time
                     cardMemory[card.position] = newState.copy(lastSeen = System.currentTimeMillis())
@@ -88,23 +90,23 @@ class MatchLogic {
      */
     fun calculateNextMove(): NextMove? {
         val availableMatches = findAvailableMatches()
-        
+
         return when {
             // If we have a guaranteed match, take it
             availableMatches.isNotEmpty() -> {
                 val match = availableMatches.first()
-                NextMove.MAKE_MATCH(match.first, match.second, match.first)
+                NextMove.MAKE_MATCH(match.first, match.second, match.third)
             }
-            
+
             // If only one card is face up, flip another strategic card
             getCurrentlyRevealed().size == 1 -> {
                 val revealedCard = getCurrentlyRevealed().first()
                 val strategicMove = findStrategicMove(revealedCard)
-                strategicMove?.let { 
+                strategicMove?.let {
                     NextMove.FLIP_CARD(it, "Strategic flip to find match for revealed card")
                 }
             }
-            
+
             // If no cards are face up, start with a random unrevealed card
             getCurrentlyRevealed().isEmpty() -> {
                 val unrevealedCard = findUnrevealedCard()
@@ -112,7 +114,7 @@ class MatchLogic {
                     NextMove.FLIP_CARD(it, "Initial card flip")
                 }
             }
-            
+
             // Multiple cards revealed but no matches - this shouldn't happen in a memory game
             else -> {
                 Log.w(TAG, "Unexpected game state: ${getCurrentlyRevealed().size} cards revealed but no matches")
@@ -127,11 +129,11 @@ class MatchLogic {
     fun recordMatch(card1: Rect, card2: Rect) {
         matchCount++
         moveCount++
-        
+
         // Remove matched cards from memory (they're no longer on the board)
         cardMemory.remove(card1)
         cardMemory.remove(card2)
-        
+
         Log.d(TAG, "Match recorded: $matchCount matches made, $moveCount total moves")
     }
 
@@ -208,7 +210,7 @@ class MatchLogic {
 
     private fun findAvailableMatches(): List<Triple<Rect, Rect, Int>> {
         val matches = mutableListOf<Triple<Rect, Rect, Int>>()
-        
+
         revealedPairs.forEach { (templateIndex, positions) ->
             if (positions.size >= 2) {
                 // We have at least 2 cards of the same type revealed
@@ -219,20 +221,20 @@ class MatchLogic {
                 }
             }
         }
-        
+
         return matches
     }
 
     private fun findStrategicMove(revealedCard: CardRecognizer.DetectedCard): Rect? {
         val revealedTemplateIndex = revealedCard.templateIndex
-        
+
         // Look for cards we know have the same template but are currently face-down
         cardMemory.entries.find { (position, state) ->
-            !state.isFaceUp && 
-            state.templateIndex == revealedTemplateIndex &&
-            position != revealedCard.position
+            !state.isFaceUp &&
+                    state.templateIndex == revealedTemplateIndex &&
+                    position != revealedCard.position
         }?.let { return it.key }
-        
+
         // If no strategic move found, pick any face-down card we haven't seen
         return findUnrevealedCard()
     }
@@ -278,5 +280,35 @@ class MatchLogic {
         val cardsRemaining: Int,
         val revealedCount: Int,
         val knownCardTypes: Int
-    )
+    ) : Parcelable {
+        constructor(parcel: Parcel) : this(
+            parcel.readInt(),
+            parcel.readInt(),
+            parcel.readInt(),
+            parcel.readInt(),
+            parcel.readInt()
+        )
+
+        override fun writeToParcel(parcel: Parcel, flags: Int) {
+            parcel.writeInt(totalMoves)
+            parcel.writeInt(matchesMade)
+            parcel.writeInt(cardsRemaining)
+            parcel.writeInt(revealedCount)
+            parcel.writeInt(knownCardTypes)
+        }
+
+        override fun describeContents(): Int {
+            return 0
+        }
+
+        companion object CREATOR : Parcelable.Creator<GameStats> {
+            override fun createFromParcel(parcel: Parcel): GameStats {
+                return GameStats(parcel)
+            }
+
+            override fun newArray(size: Int): Array<GameStats?> {
+                return arrayOfNulls(size)
+            }
+        }
+    }
 }

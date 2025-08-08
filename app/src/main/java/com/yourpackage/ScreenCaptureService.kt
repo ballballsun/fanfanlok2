@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.*
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -22,9 +24,7 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import org.opencv.android.OpenCVLoaderCallback
 import org.opencv.android.OpenCVLoader
-import org.opencv.android.BaseLoaderCallback
 import java.nio.ByteBuffer
 
 class ScreenCaptureService : Service() {
@@ -37,7 +37,7 @@ class ScreenCaptureService : Service() {
         const val TAG = "ScreenCapture"
         const val VIRTUAL_DISPLAY_NAME = "ScreenCapture"
         const val CAPTURE_INTERVAL_MS = 500L // Capture every 500ms for performance
-        
+
         // Service state broadcast actions
         const val ACTION_AUTOMATION_STATE = "com.example.fanfanlok.AUTOMATION_STATE"
         const val EXTRA_IS_RUNNING = "is_running"
@@ -50,32 +50,33 @@ class ScreenCaptureService : Service() {
 
     private var resultCode: Int = 0
     private var resultData: Intent? = null
-    
+
     // Recognition components
     private var cardRecognizer: CardRecognizer? = null
     private var boardLayoutManager: BoardLayoutManager? = null
     private var matchLogic: MatchLogic? = null
-    
+
     // Automation state
     private var isAutomationRunning = false
     private var captureHandler = Handler(Looper.getMainLooper())
     private var lastCaptureTime = 0L
-    
+
     // Screen dimensions
     private var screenWidth = 0
     private var screenHeight = 0
 
-    // OpenCV initialization callback
-    private val openCVLoaderCallback = object : BaseLoaderCallback(this) {
-        override fun onManagerConnected(status: Int) {
-            when (status) {
-                OpenCVLoaderCallback.SUCCESS -> {
-                    Log.d(TAG, "OpenCV loaded successfully")
-                    initializeRecognition()
+    // OpenCV initialization state
+    private var isOpenCVInitialized = false
+
+    // Broadcast receiver for automation control
+    private val automationControlReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                OverlayService.ACTION_START_AUTOMATION -> {
+                    startAutomation()
                 }
-                else -> {
-                    Log.e(TAG, "OpenCV initialization failed")
-                    super.onManagerConnected(status)
+                OverlayService.ACTION_STOP_AUTOMATION -> {
+                    stopAutomation()
                 }
             }
         }
@@ -84,12 +85,31 @@ class ScreenCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        
-        // Initialize OpenCV
-        if (!OpenCVLoader.initDebug()) {
-            OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION, this, openCVLoaderCallback)
-        } else {
-            openCVLoaderCallback.onManagerConnected(OpenCVLoaderCallback.SUCCESS)
+
+        // Initialize OpenCV synchronously
+        initializeOpenCV()
+
+        // Register automation control receiver
+        val filter = IntentFilter().apply {
+            addAction(OverlayService.ACTION_START_AUTOMATION)
+            addAction(OverlayService.ACTION_STOP_AUTOMATION)
+        }
+        registerReceiver(automationControlReceiver, filter)
+    }
+
+    private fun initializeOpenCV() {
+        try {
+            if (OpenCVLoader.initDebug()) {
+                Log.d(TAG, "OpenCV loaded successfully")
+                isOpenCVInitialized = true
+                initializeRecognition()
+            } else {
+                Log.e(TAG, "OpenCV initialization failed")
+                isOpenCVInitialized = false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during OpenCV initialization", e)
+            isOpenCVInitialized = false
         }
     }
 
@@ -114,11 +134,20 @@ class ScreenCaptureService : Service() {
     }
 
     private fun initializeRecognition() {
-        cardRecognizer = CardRecognizer(this)
-        boardLayoutManager = BoardLayoutManager(this)
-        matchLogic = MatchLogic()
-        
-        Log.d(TAG, "Recognition components initialized")
+        if (!isOpenCVInitialized) {
+            Log.w(TAG, "Cannot initialize recognition - OpenCV not ready")
+            return
+        }
+
+        try {
+            cardRecognizer = CardRecognizer(this)
+            boardLayoutManager = BoardLayoutManager(this)
+            matchLogic = MatchLogic()
+
+            Log.d(TAG, "Recognition components initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize recognition components", e)
+        }
     }
 
     private fun setupVirtualDisplay() {
@@ -144,24 +173,24 @@ class ScreenCaptureService : Service() {
 
         imageReader?.setOnImageAvailableListener({ reader ->
             val currentTime = System.currentTimeMillis()
-            
+
             // Rate limit captures for performance
             if (currentTime - lastCaptureTime < CAPTURE_INTERVAL_MS) {
                 reader.acquireLatestImage()?.close()
                 return@setOnImageAvailableListener
             }
-            
+
             lastCaptureTime = currentTime
-            
+
             val image = reader.acquireLatestImage()
-            if (image != null && isAutomationRunning) {
+            if (image != null && isAutomationRunning && isOpenCVInitialized) {
                 processScreenCapture(image)
                 image.close()
             } else {
                 image?.close()
             }
         }, null)
-        
+
         Log.d(TAG, "Virtual display setup complete: ${screenWidth}x${screenHeight}")
     }
 
@@ -185,10 +214,10 @@ class ScreenCaptureService : Service() {
         try {
             // Use cached positions if available
             val cachedPositions = boardLayoutManager.getCachedPositions()
-            
+
             // Detect cards
             val detectionResult = cardRecognizer.detectAllCards(screenshot, cachedPositions)
-            
+
             // Validate and update cached positions if needed
             if (cachedPositions != null) {
                 val validation = boardLayoutManager.validatePositions(detectionResult.boardPositions)
@@ -196,8 +225,8 @@ class ScreenCaptureService : Service() {
                     BoardLayoutManager.ValidationResult.MISMATCH -> {
                         Log.d(TAG, "Layout mismatch, updating cached positions")
                         boardLayoutManager.updateCachedPositions(
-                            detectionResult.boardPositions, 
-                            screenWidth, 
+                            detectionResult.boardPositions,
+                            screenWidth,
                             screenHeight
                         )
                     }
@@ -221,26 +250,26 @@ class ScreenCaptureService : Service() {
 
             // Update game logic
             val gameUpdate = matchLogic.updateGameState(detectionResult)
-            
+
             // Calculate next move
             val nextMove = matchLogic.calculateNextMove()
-            
+
             // Execute move if available
             nextMove?.let { move ->
                 executeMove(move)
             }
-            
+
             // Broadcast game state
             broadcastGameState(matchLogic.getGameStats())
-            
+
             // Check if game is complete
             if (matchLogic.isGameComplete()) {
                 Log.d(TAG, "Game completed!")
                 stopAutomation()
             }
-            
+
             Log.d(TAG, "Recognition cycle completed: ${detectionResult.cards.size} cards detected")
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "Error in card recognition", e)
         }
@@ -249,26 +278,26 @@ class ScreenCaptureService : Service() {
     private fun executeMove(move: MatchLogic.NextMove) {
         when (move) {
             is MatchLogic.NextMove.FLIP_CARD -> {
-                simulateTap(move.position.x + move.position.width / 2, 
-                           move.position.y + move.position.height / 2)
+                simulateTap(move.position.x + move.position.width / 2,
+                    move.position.y + move.position.height / 2)
                 Log.d(TAG, "Executing flip card: ${move.reason}")
             }
             is MatchLogic.NextMove.MAKE_MATCH -> {
                 // Tap first card
-                simulateTap(move.card1.x + move.card1.width / 2, 
-                           move.card1.y + move.card1.height / 2)
-                
+                simulateTap(move.card1.x + move.card1.width / 2,
+                    move.card1.y + move.card1.height / 2)
+
                 // Wait briefly and tap second card
                 captureHandler.postDelayed({
-                    simulateTap(move.card2.x + move.card2.width / 2, 
-                               move.card2.y + move.card2.height / 2)
+                    simulateTap(move.card2.x + move.card2.width / 2,
+                        move.card2.y + move.card2.height / 2)
                     matchLogic?.recordMatch(move.card1, move.card2)
                 }, 300)
-                
+
                 Log.d(TAG, "Executing match for template ${move.templateIndex}")
             }
         }
-        
+
         matchLogic?.recordMove()
     }
 
@@ -282,6 +311,11 @@ class ScreenCaptureService : Service() {
     }
 
     fun startAutomation() {
+        if (!isOpenCVInitialized) {
+            Log.e(TAG, "Cannot start automation - OpenCV not initialized")
+            return
+        }
+
         isAutomationRunning = true
         matchLogic?.reset()
         broadcastAutomationState(true)
@@ -322,7 +356,7 @@ class ScreenCaptureService : Service() {
             Bitmap.Config.RGB_565
         )
         bitmap.copyPixelsFromBuffer(buffer)
-        
+
         return if (rowPadding == 0) {
             bitmap
         } else {
@@ -374,6 +408,13 @@ class ScreenCaptureService : Service() {
         mediaProjection?.stop()
         cardRecognizer?.cleanup()
         captureHandler.removeCallbacksAndMessages(null)
+
+        try {
+            unregisterReceiver(automationControlReceiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error unregistering receiver", e)
+        }
+
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
     }
