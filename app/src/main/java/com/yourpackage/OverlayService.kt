@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.PixelFormat
 import android.os.IBinder
+import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -19,6 +20,7 @@ import android.widget.Toast
 class OverlayService : Service() {
 
     companion object {
+        private const val TAG = "OverlayService"
         const val ACTION_START_AUTOMATION = "com.example.fanfanlok.START_AUTOMATION"
         const val ACTION_STOP_AUTOMATION = "com.example.fanfanlok.STOP_AUTOMATION"
     }
@@ -35,11 +37,13 @@ class OverlayService : Service() {
     // Broadcast receiver for automation state updates
     private val automationStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received automation state broadcast: ${intent?.action}")
             when (intent?.action) {
                 ScreenCaptureService.ACTION_AUTOMATION_STATE -> {
                     val isRunning = intent.getBooleanExtra(ScreenCaptureService.EXTRA_IS_RUNNING, false)
                     val stats = intent.getParcelableExtra<MatchLogic.GameStats>(ScreenCaptureService.EXTRA_GAME_STATS)
-                    
+
+                    Log.d(TAG, "Automation state updated: $isRunning")
                     updateAutomationState(isRunning)
                     stats?.let { updateGameStats(it) }
                 }
@@ -49,6 +53,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "OverlayService onCreate")
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         setupOverlayView()
@@ -88,6 +93,7 @@ class OverlayService : Service() {
 
         // Set up toggle button action
         btnToggle.setOnClickListener {
+            Log.d(TAG, "Toggle button clicked, current state: $isAutomationRunning")
             toggleAutomation()
         }
 
@@ -96,6 +102,7 @@ class OverlayService : Service() {
 
         // Initialize UI
         updateUI()
+        Log.d(TAG, "Overlay view setup complete")
     }
 
     private fun setupDragAndDrop(params: WindowManager.LayoutParams) {
@@ -119,7 +126,7 @@ class OverlayService : Service() {
                     MotionEvent.ACTION_MOVE -> {
                         val deltaX = (event.rawX - initialTouchX).toInt()
                         val deltaY = (event.rawY - initialTouchY).toInt()
-                        
+
                         // Only start dragging if moved significantly
                         if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
                             isDragging = true
@@ -142,9 +149,11 @@ class OverlayService : Service() {
     private fun registerAutomationReceiver() {
         val filter = IntentFilter(ScreenCaptureService.ACTION_AUTOMATION_STATE)
         registerReceiver(automationStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        Log.d(TAG, "Automation state receiver registered")
     }
 
     private fun toggleAutomation() {
+        Log.d(TAG, "toggleAutomation called, current state: $isAutomationRunning")
         if (isAutomationRunning) {
             stopAutomation()
         } else {
@@ -153,22 +162,37 @@ class OverlayService : Service() {
     }
 
     private fun startAutomation() {
+        Log.d(TAG, "startAutomation called - sending broadcast")
+
+        // Update local state immediately for UI responsiveness
+        isAutomationRunning = true
+        updateUI()
+
         // Send broadcast to start automation
         val intent = Intent(ACTION_START_AUTOMATION)
         sendBroadcast(intent)
-        
-        Toast.makeText(this, "🚀 Automation Started", Toast.LENGTH_SHORT).show()
+
+        Log.d(TAG, "Sent START_AUTOMATION broadcast")
+        Toast.makeText(this, "🚀 Starting Automation...", Toast.LENGTH_SHORT).show()
     }
 
     private fun stopAutomation() {
+        Log.d(TAG, "stopAutomation called - sending broadcast")
+
+        // Update local state immediately for UI responsiveness
+        isAutomationRunning = false
+        updateUI()
+
         // Send broadcast to stop automation
         val intent = Intent(ACTION_STOP_AUTOMATION)
         sendBroadcast(intent)
-        
-        Toast.makeText(this, "⏹️ Automation Stopped", Toast.LENGTH_SHORT).show()
+
+        Log.d(TAG, "Sent STOP_AUTOMATION broadcast")
+        Toast.makeText(this, "⏹️ Stopping Automation...", Toast.LENGTH_SHORT).show()
     }
 
     private fun updateAutomationState(isRunning: Boolean) {
+        Log.d(TAG, "updateAutomationState: $isRunning")
         isAutomationRunning = isRunning
         updateUI()
     }
@@ -180,17 +204,20 @@ class OverlayService : Service() {
             Cards Left: ${stats.cardsRemaining}
             Revealed: ${stats.revealedCount}
         """.trimIndent()
-        
+
         tvStats.text = statsText
+        Log.d(TAG, "Updated game stats: moves=${stats.totalMoves}, matches=${stats.matchesMade}")
     }
 
     private fun updateUI() {
+        Log.d(TAG, "updateUI called, automation running: $isAutomationRunning")
+
         // Update toggle button
         btnToggle.text = if (isAutomationRunning) "⏹️ STOP" else "▶️ START"
         btnToggle.setBackgroundColor(
-            if (isAutomationRunning) 
+            if (isAutomationRunning)
                 android.graphics.Color.parseColor("#FF6B6B") // Red for stop
-            else 
+            else
                 android.graphics.Color.parseColor("#4ECDC4") // Green for start
         )
 
@@ -208,19 +235,25 @@ class OverlayService : Service() {
             else
                 android.graphics.Color.parseColor("#9E9E9E") // Gray
         )
+
+        Log.d(TAG, "UI updated - button text: ${btnToggle.text}, status: ${tvStatus.text}")
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "OverlayService onDestroy")
+
         try {
             unregisterReceiver(automationStateReceiver)
+            Log.d(TAG, "Automation receiver unregistered")
         } catch (e: Exception) {
-            // Receiver might not be registered
+            Log.w(TAG, "Error unregistering receiver", e)
         }
-        
+
         if (::overlayView.isInitialized) {
             windowManager.removeView(overlayView)
+            Log.d(TAG, "Overlay view removed")
         }
-        
+
         super.onDestroy()
     }
 
