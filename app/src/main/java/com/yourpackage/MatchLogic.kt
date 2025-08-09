@@ -12,6 +12,7 @@ class MatchLogic {
 
     companion object {
         private const val TAG = "MatchLogic"
+        private const val EXPECTED_TOTAL_CARDS = 24 // 4x6 grid
     }
 
     // Card state tracking
@@ -20,6 +21,7 @@ class MatchLogic {
     private var lastFlippedCard: Rect? = null
     private var moveCount = 0
     private var matchCount = 0
+    private var gameStarted = false
 
     /**
      * Update game state based on detected cards
@@ -30,6 +32,15 @@ class MatchLogic {
         val newlyHidden = mutableListOf<Rect>()
 
         Log.d(TAG, "Updating game state with ${detectionResult.cards.size} detected cards")
+
+        // Check if this is the initial game state (all cards face-down)
+        if (!gameStarted && detectionResult.cards.size >= EXPECTED_TOTAL_CARDS) {
+            val faceDownCards = detectionResult.cards.count { !it.isFaceUp }
+            if (faceDownCards >= EXPECTED_TOTAL_CARDS) {
+                gameStarted = true
+                Log.d(TAG, "Game started detected: $faceDownCards face-down cards found")
+            }
+        }
 
         // Process each detected card
         detectionResult.cards.forEach { card ->
@@ -97,6 +108,12 @@ class MatchLogic {
      * Calculate the next optimal move
      */
     fun calculateNextMove(): NextMove? {
+        // Don't start automation until we detect the initial game state
+        if (!gameStarted) {
+            Log.d(TAG, "Game not started yet - waiting for initial card detection")
+            return null
+        }
+
         val availableMatches = findAvailableMatches()
         val currentlyRevealed = getCurrentlyRevealed()
 
@@ -134,7 +151,7 @@ class MatchLogic {
                     Log.d(TAG, "No cards revealed, making initial flip")
                     NextMove.FLIP_CARD(it, "Initial card flip")
                 } ?: run {
-                    Log.w(TAG, "No unrevealed cards found!")
+                    Log.w(TAG, "No face-down cards found in memory")
                     null
                 }
             }
@@ -177,10 +194,25 @@ class MatchLogic {
      * Check if the game is complete
      */
     fun isGameComplete(): Boolean {
-        // Count cards that are not face-down card backs
-        val remainingCards = cardMemory.values.count { it.templateIndex >= 0 }
-        Log.d(TAG, "Game complete check: $remainingCards cards remaining")
-        return remainingCards == 0
+        if (!gameStarted) {
+            Log.d(TAG, "Game not started yet, not complete")
+            return false
+        }
+
+        // Game is complete when no cards remain (all matched) OR all cards have been flipped at least once
+        val remainingCards = cardMemory.values.count { it.templateIndex >= 0 || !it.isFaceUp }
+        val hasOnlyMatchedCards = cardMemory.isEmpty() || cardMemory.values.all { it.templateIndex >= 0 }
+
+        Log.d(TAG, "Game complete check: $remainingCards cards remaining, hasOnlyMatchedCards: $hasOnlyMatchedCards")
+
+        // Complete if we started with expected cards and now have few/no cards left
+        val isComplete = gameStarted && (remainingCards == 0 || matchCount >= EXPECTED_TOTAL_CARDS / 2)
+
+        if (isComplete) {
+            Log.d(TAG, "Game completed! Matches made: $matchCount, Expected matches: ${EXPECTED_TOTAL_CARDS / 2}")
+        }
+
+        return isComplete
     }
 
     /**
@@ -206,6 +238,7 @@ class MatchLogic {
         lastFlippedCard = null
         moveCount = 0
         matchCount = 0
+        gameStarted = false
         Log.d(TAG, "Match logic reset")
     }
 
@@ -292,7 +325,7 @@ class MatchLogic {
             return faceDownCard
         }
 
-        Log.w(TAG, "No face-down cards found in memory")
+        Log.w(TAG, "No unrevealed cards found!")
         return null
     }
 

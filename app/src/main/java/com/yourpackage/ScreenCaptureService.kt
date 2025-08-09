@@ -66,6 +66,11 @@ class ScreenCaptureService : Service() {
     // OpenCV initialization state
     private var isOpenCVInitialized = false
 
+    // Game detection state
+    private var initialGameDetected = false
+    private var gameDetectionAttempts = 0
+    private val maxGameDetectionAttempts = 10
+
     // Broadcast receiver for automation control
     private val automationControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -297,8 +302,8 @@ class ScreenCaptureService : Service() {
         try {
             Log.d(TAG, "Performing card recognition on ${screenshot.width}x${screenshot.height} bitmap")
 
-            // Use cached positions if available
-            val cachedPositions = boardLayoutManager.getCachedPositions()
+            // Use cached positions if available and initial game has been detected
+            val cachedPositions = if (initialGameDetected) boardLayoutManager.getCachedPositions() else null
             Log.d(TAG, "Cached positions: ${cachedPositions?.size ?: 0}")
 
             // Detect cards
@@ -307,6 +312,34 @@ class ScreenCaptureService : Service() {
 
             detectionResult.cards.forEach { card ->
                 Log.d(TAG, "Card: ${card.templateName} at (${card.position.x}, ${card.position.y}) faceUp=${card.isFaceUp}")
+            }
+
+            // Check for initial game state detection
+            if (!initialGameDetected) {
+                val faceDownCount = detectionResult.cards.count { !it.isFaceUp }
+                Log.d(TAG, "Initial game detection: found $faceDownCount face-down cards")
+
+                if (faceDownCount >= 20) { // At least 20 face-down cards suggests game start
+                    initialGameDetected = true
+                    Log.d(TAG, "Initial game state detected! Found $faceDownCount face-down cards")
+
+                    // Save the board layout
+                    boardLayoutManager.saveBoardLayout(
+                        detectionResult.boardPositions,
+                        screenWidth,
+                        screenHeight
+                    )
+                } else {
+                    gameDetectionAttempts++
+                    if (gameDetectionAttempts >= maxGameDetectionAttempts) {
+                        Log.w(TAG, "Could not detect initial game state after $maxGameDetectionAttempts attempts")
+                        // Continue anyway, maybe the game is already in progress
+                        initialGameDetected = true
+                    } else {
+                        Log.d(TAG, "Waiting for game to start... attempt $gameDetectionAttempts/$maxGameDetectionAttempts")
+                        return // Skip processing until we detect the initial state
+                    }
+                }
             }
 
             // Validate and update cached positions if needed
@@ -419,7 +452,10 @@ class ScreenCaptureService : Service() {
 
         Log.d(TAG, "Starting automation - OpenCV initialized: $isOpenCVInitialized")
         isAutomationRunning = true
+        initialGameDetected = false // Reset game detection
+        gameDetectionAttempts = 0
         matchLogic?.reset()
+        boardLayoutManager?.clearCache() // Clear cache for fresh detection
         broadcastAutomationState(true)
         Log.d(TAG, "Automation started - now processing captures")
     }
@@ -427,6 +463,8 @@ class ScreenCaptureService : Service() {
     fun stopAutomation() {
         Log.d(TAG, "Stopping automation")
         isAutomationRunning = false
+        initialGameDetected = false
+        gameDetectionAttempts = 0
         broadcastAutomationState(false)
         Log.d(TAG, "Automation stopped")
     }
