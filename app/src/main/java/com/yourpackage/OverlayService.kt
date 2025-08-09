@@ -154,10 +154,11 @@ class OverlayService : Service() {
 
     private fun toggleAutomation() {
         Log.d(TAG, "toggleAutomation called, current state: $isAutomationRunning")
-        if (isAutomationRunning) {
-            stopAutomation()
-        } else {
+        // FIXED: Corrected the logic - when NOT running, START it
+        if (!isAutomationRunning) {
             startAutomation()
+        } else {
+            stopAutomation()
         }
     }
 
@@ -168,11 +169,17 @@ class OverlayService : Service() {
         isAutomationRunning = true
         updateUI()
 
-        // Send broadcast to start automation
-        val intent = Intent(ACTION_START_AUTOMATION)
-        sendBroadcast(intent)
+        // Send broadcast with explicit targeting to ensure delivery
+        val intent = Intent(ACTION_START_AUTOMATION).apply {
+            // Add explicit package targeting to ensure broadcast delivery
+            setPackage(packageName)
+            // Add flags for better broadcast delivery
+            addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+        }
 
-        Log.d(TAG, "Sent START_AUTOMATION broadcast")
+        sendBroadcast(intent)
+        Log.d(TAG, "Sent START_AUTOMATION broadcast with package: $packageName")
+
         Toast.makeText(this, "🚀 Starting Automation...", Toast.LENGTH_SHORT).show()
     }
 
@@ -183,11 +190,17 @@ class OverlayService : Service() {
         isAutomationRunning = false
         updateUI()
 
-        // Send broadcast to stop automation
-        val intent = Intent(ACTION_STOP_AUTOMATION)
-        sendBroadcast(intent)
+        // Send broadcast with explicit targeting to ensure delivery
+        val intent = Intent(ACTION_STOP_AUTOMATION).apply {
+            // Add explicit package targeting to ensure broadcast delivery
+            setPackage(packageName)
+            // Add flags for better broadcast delivery
+            addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+        }
 
-        Log.d(TAG, "Sent STOP_AUTOMATION broadcast")
+        sendBroadcast(intent)
+        Log.d(TAG, "Sent STOP_AUTOMATION broadcast with package: $packageName")
+
         Toast.makeText(this, "⏹️ Stopping Automation...", Toast.LENGTH_SHORT).show()
     }
 

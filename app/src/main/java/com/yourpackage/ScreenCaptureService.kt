@@ -72,9 +72,11 @@ class ScreenCaptureService : Service() {
             Log.d(TAG, "Received automation control: ${intent?.action}")
             when (intent?.action) {
                 OverlayService.ACTION_START_AUTOMATION -> {
+                    Log.d(TAG, "Processing START_AUTOMATION broadcast")
                     startAutomation()
                 }
                 OverlayService.ACTION_STOP_AUTOMATION -> {
+                    Log.d(TAG, "Processing STOP_AUTOMATION broadcast")
                     stopAutomation()
                 }
             }
@@ -89,14 +91,32 @@ class ScreenCaptureService : Service() {
         // Initialize OpenCV synchronously
         initializeOpenCV()
 
-        // Register automation control receiver
+        // Register automation control receiver - FIXED: Register immediately in onCreate
+        registerAutomationControlReceiver()
+    }
+
+    private fun registerAutomationControlReceiver() {
         val filter = IntentFilter().apply {
             addAction(OverlayService.ACTION_START_AUTOMATION)
             addAction(OverlayService.ACTION_STOP_AUTOMATION)
         }
 
-        registerReceiver(automationControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        Log.d(TAG, "Automation control receiver registered")
+        try {
+            // Try different registration flags based on Android version
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(automationControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(automationControlReceiver, filter)
+            }
+            Log.d(TAG, "Automation control receiver registered successfully with actions: ${filter.countActions()}")
+
+            // Log the registered actions for debugging
+            for (i in 0 until filter.countActions()) {
+                Log.d(TAG, "Registered action [$i]: ${filter.getAction(i)}")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register automation control receiver", e)
+        }
     }
 
     private fun initializeOpenCV() {
@@ -165,13 +185,8 @@ class ScreenCaptureService : Service() {
         setupVirtualDisplay()
         isProjectionRunning = true
 
-        // AUTO-START automation after a brief delay
-        captureHandler.postDelayed({
-            Log.d(TAG, "Auto-starting automation...")
-            startAutomation()
-        }, 2000) // 2 second delay
-
-        Log.d(TAG, "MediaProjection started successfully")
+        // REMOVED AUTO-START - Let overlay control the start
+        Log.d(TAG, "MediaProjection started successfully - waiting for automation start command")
         return START_NOT_STICKY // Don't restart automatically with stale Intent
     }
 
@@ -398,9 +413,11 @@ class ScreenCaptureService : Service() {
     fun startAutomation() {
         if (!isOpenCVInitialized) {
             Log.e(TAG, "Cannot start automation - OpenCV not initialized")
+            broadcastAutomationState(false)
             return
         }
 
+        Log.d(TAG, "Starting automation - OpenCV initialized: $isOpenCVInitialized")
         isAutomationRunning = true
         matchLogic?.reset()
         broadcastAutomationState(true)
@@ -408,6 +425,7 @@ class ScreenCaptureService : Service() {
     }
 
     fun stopAutomation() {
+        Log.d(TAG, "Stopping automation")
         isAutomationRunning = false
         broadcastAutomationState(false)
         Log.d(TAG, "Automation stopped")
@@ -506,6 +524,7 @@ class ScreenCaptureService : Service() {
 
         try {
             unregisterReceiver(automationControlReceiver)
+            Log.d(TAG, "Automation control receiver unregistered")
         } catch (e: Exception) {
             Log.w(TAG, "Error unregistering receiver", e)
         }
