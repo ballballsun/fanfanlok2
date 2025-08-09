@@ -29,6 +29,8 @@ class MatchLogic {
         val newlyRevealed = mutableListOf<CardRecognizer.DetectedCard>()
         val newlyHidden = mutableListOf<Rect>()
 
+        Log.d(TAG, "Updating game state with ${detectionResult.cards.size} detected cards")
+
         // Process each detected card
         detectionResult.cards.forEach { card ->
             val previousState = cardMemory[card.position]
@@ -46,8 +48,9 @@ class MatchLogic {
                     // New card discovered
                     cardMemory[card.position] = newState
                     updates.add(StateChange.CARD_DISCOVERED(card.position, newState))
+                    Log.d(TAG, "New card discovered at (${card.position.x}, ${card.position.y}): ${card.templateName}, faceUp=${card.isFaceUp}")
 
-                    if (card.isFaceUp) {
+                    if (card.isFaceUp && card.templateIndex >= 0) {
                         newlyRevealed.add(card)
                         addToRevealedPairs(card.templateIndex, card.position)
                     }
@@ -56,8 +59,9 @@ class MatchLogic {
                 previousState.isFaceUp != card.isFaceUp -> {
                     // Card flipped
                     cardMemory[card.position] = newState
+                    Log.d(TAG, "Card state changed at (${card.position.x}, ${card.position.y}): ${previousState.isFaceUp} -> ${card.isFaceUp}")
 
-                    if (card.isFaceUp) {
+                    if (card.isFaceUp && card.templateIndex >= 0) {
                         newlyRevealed.add(card)
                         addToRevealedPairs(card.templateIndex, card.position)
                         updates.add(StateChange.CARD_FLIPPED_UP(card.position, newState))
@@ -75,7 +79,7 @@ class MatchLogic {
             }
         }
 
-        return GameStateUpdate(
+        val gameUpdate = GameStateUpdate(
             stateChanges = updates,
             newlyRevealed = newlyRevealed,
             newlyHidden = newlyHidden,
@@ -83,6 +87,10 @@ class MatchLogic {
             revealedCards = getCurrentlyRevealed(),
             availableMatches = findAvailableMatches()
         )
+
+        Log.d(TAG, "Game state updated: ${gameUpdate.totalCards} total cards, ${gameUpdate.revealedCards.size} revealed, ${gameUpdate.availableMatches.size} matches available")
+
+        return gameUpdate
     }
 
     /**
@@ -90,35 +98,51 @@ class MatchLogic {
      */
     fun calculateNextMove(): NextMove? {
         val availableMatches = findAvailableMatches()
+        val currentlyRevealed = getCurrentlyRevealed()
+
+        Log.d(TAG, "Calculating next move: ${availableMatches.size} matches available, ${currentlyRevealed.size} cards revealed")
 
         return when {
             // If we have a guaranteed match, take it
             availableMatches.isNotEmpty() -> {
                 val match = availableMatches.first()
+                Log.d(TAG, "Found available match for template ${match.third}")
                 NextMove.MAKE_MATCH(match.first, match.second, match.third)
             }
 
             // If only one card is face up, flip another strategic card
-            getCurrentlyRevealed().size == 1 -> {
-                val revealedCard = getCurrentlyRevealed().first()
+            currentlyRevealed.size == 1 -> {
+                val revealedCard = currentlyRevealed.first()
                 val strategicMove = findStrategicMove(revealedCard)
                 strategicMove?.let {
+                    Log.d(TAG, "Strategic move: flipping card to find match for ${revealedCard.templateName}")
                     NextMove.FLIP_CARD(it, "Strategic flip to find match for revealed card")
+                } ?: run {
+                    // If no strategic move, flip any face-down card
+                    val randomCard = findUnrevealedCard()
+                    randomCard?.let {
+                        Log.d(TAG, "No strategic move found, flipping random card")
+                        NextMove.FLIP_CARD(it, "Random flip to continue game")
+                    }
                 }
             }
 
             // If no cards are face up, start with a random unrevealed card
-            getCurrentlyRevealed().isEmpty() -> {
+            currentlyRevealed.isEmpty() -> {
                 val unrevealedCard = findUnrevealedCard()
                 unrevealedCard?.let {
+                    Log.d(TAG, "No cards revealed, making initial flip")
                     NextMove.FLIP_CARD(it, "Initial card flip")
+                } ?: run {
+                    Log.w(TAG, "No unrevealed cards found!")
+                    null
                 }
             }
 
-            // Multiple cards revealed but no matches - this shouldn't happen in a memory game
+            // Multiple cards revealed but no matches - wait for cards to flip back down
             else -> {
-                Log.w(TAG, "Unexpected game state: ${getCurrentlyRevealed().size} cards revealed but no matches")
-                null
+                Log.d(TAG, "Multiple cards revealed (${currentlyRevealed.size}) but no matches - waiting...")
+                null // Wait for the cards to flip back down
             }
         }
     }
@@ -131,10 +155,14 @@ class MatchLogic {
         moveCount++
 
         // Remove matched cards from memory (they're no longer on the board)
-        cardMemory.remove(card1)
-        cardMemory.remove(card2)
+        val card1State = cardMemory.remove(card1)
+        val card2State = cardMemory.remove(card2)
 
-        Log.d(TAG, "Match recorded: $matchCount matches made, $moveCount total moves")
+        // Also remove from revealed pairs
+        card1State?.let { removeFromRevealedPairs(it.templateIndex, card1) }
+        card2State?.let { removeFromRevealedPairs(it.templateIndex, card2) }
+
+        Log.d(TAG, "Match recorded: $matchCount matches made, $moveCount total moves, ${cardMemory.size} cards remaining")
     }
 
     /**
@@ -149,7 +177,9 @@ class MatchLogic {
      * Check if the game is complete
      */
     fun isGameComplete(): Boolean {
-        val remainingCards = cardMemory.values.count { it.templateIndex >= 0 } // Exclude face-down cards
+        // Count cards that are not face-down card backs
+        val remainingCards = cardMemory.values.count { it.templateIndex >= 0 }
+        Log.d(TAG, "Game complete check: $remainingCards cards remaining")
         return remainingCards == 0
     }
 
@@ -157,11 +187,12 @@ class MatchLogic {
      * Get current game statistics
      */
     fun getGameStats(): GameStats {
+        val revealedCount = getCurrentlyRevealed().size
         return GameStats(
             totalMoves = moveCount,
             matchesMade = matchCount,
             cardsRemaining = cardMemory.size,
-            revealedCount = getCurrentlyRevealed().size,
+            revealedCount = revealedCount,
             knownCardTypes = revealedPairs.keys.size
         )
     }
@@ -183,6 +214,7 @@ class MatchLogic {
             val positions = revealedPairs.getOrPut(templateIndex) { mutableListOf() }
             if (!positions.contains(position)) {
                 positions.add(position)
+                Log.d(TAG, "Added card to revealed pairs: template $templateIndex, total positions: ${positions.size}")
             }
         }
     }
@@ -192,10 +224,11 @@ class MatchLogic {
         if (revealedPairs[templateIndex]?.isEmpty() == true) {
             revealedPairs.remove(templateIndex)
         }
+        Log.d(TAG, "Removed card from revealed pairs: template $templateIndex")
     }
 
     private fun getCurrentlyRevealed(): List<CardRecognizer.DetectedCard> {
-        return cardMemory.entries
+        val revealed = cardMemory.entries
             .filter { it.value.isFaceUp && it.value.templateIndex >= 0 }
             .map { (position, state) ->
                 CardRecognizer.DetectedCard(
@@ -206,6 +239,9 @@ class MatchLogic {
                     confidence = state.confidence
                 )
             }
+
+        Log.d(TAG, "Currently revealed cards: ${revealed.size}")
+        return revealed
     }
 
     private fun findAvailableMatches(): List<Triple<Rect, Rect, Int>> {
@@ -217,6 +253,7 @@ class MatchLogic {
                 for (i in 0 until positions.size - 1) {
                     for (j in i + 1 until positions.size) {
                         matches.add(Triple(positions[i], positions[j], templateIndex))
+                        Log.d(TAG, "Found potential match for template $templateIndex")
                     }
                 }
             }
@@ -229,20 +266,34 @@ class MatchLogic {
         val revealedTemplateIndex = revealedCard.templateIndex
 
         // Look for cards we know have the same template but are currently face-down
-        cardMemory.entries.find { (position, state) ->
+        val strategicCard = cardMemory.entries.find { (position, state) ->
             !state.isFaceUp &&
                     state.templateIndex == revealedTemplateIndex &&
                     position != revealedCard.position
-        }?.let { return it.key }
+        }
+
+        strategicCard?.let {
+            Log.d(TAG, "Found strategic move: matching card for template $revealedTemplateIndex")
+            return it.key
+        }
 
         // If no strategic move found, pick any face-down card we haven't seen
         return findUnrevealedCard()
     }
 
     private fun findUnrevealedCard(): Rect? {
-        return cardMemory.entries
+        // First, try to find a card that's face-down (card back)
+        val faceDownCard = cardMemory.entries
             .find { (_, state) -> !state.isFaceUp }
             ?.key
+
+        if (faceDownCard != null) {
+            Log.d(TAG, "Found face-down card for flipping")
+            return faceDownCard
+        }
+
+        Log.w(TAG, "No face-down cards found in memory")
+        return null
     }
 
     // Data classes

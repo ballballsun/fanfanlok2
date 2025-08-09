@@ -69,6 +69,7 @@ class ScreenCaptureService : Service() {
     // Broadcast receiver for automation control
     private val automationControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "Received automation control: ${intent?.action}")
             when (intent?.action) {
                 OverlayService.ACTION_START_AUTOMATION -> {
                     startAutomation()
@@ -82,6 +83,7 @@ class ScreenCaptureService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "Service onCreate()")
         createNotificationChannel()
 
         // Initialize OpenCV synchronously
@@ -89,13 +91,12 @@ class ScreenCaptureService : Service() {
 
         // Register automation control receiver
         val filter = IntentFilter().apply {
-            addAction("com.example.fanfanlok.START_AUTOMATION")
-            addAction("com.example.fanfanlok.STOP_AUTOMATION")
+            addAction(OverlayService.ACTION_START_AUTOMATION)
+            addAction(OverlayService.ACTION_STOP_AUTOMATION)
         }
 
         registerReceiver(automationControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-
-
+        Log.d(TAG, "Automation control receiver registered")
     }
 
     private fun initializeOpenCV() {
@@ -117,6 +118,8 @@ class ScreenCaptureService : Service() {
     private var isProjectionRunning = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand called with intent: $intent")
+
         // If projection is already active, ignore duplicate start
         if (isProjectionRunning) {
             Log.w(TAG, "MediaProjection already running; ignoring duplicate start request")
@@ -126,6 +129,8 @@ class ScreenCaptureService : Service() {
         // Read the fresh permission data from Activity
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_INTENT)
+
+        Log.d(TAG, "Result code: $resultCode, Result data: $resultData")
 
         if (resultCode == 0 || resultData == null) {
             Log.e(TAG, "Invalid result code or missing resultData — must request fresh projection permission")
@@ -160,11 +165,15 @@ class ScreenCaptureService : Service() {
         setupVirtualDisplay()
         isProjectionRunning = true
 
+        // AUTO-START automation after a brief delay
+        captureHandler.postDelayed({
+            Log.d(TAG, "Auto-starting automation...")
+            startAutomation()
+        }, 2000) // 2 second delay
+
         Log.d(TAG, "MediaProjection started successfully")
         return START_NOT_STICKY // Don't restart automatically with stale Intent
     }
-
-
 
     private fun initializeRecognition() {
         if (!isOpenCVInitialized) {
@@ -191,6 +200,8 @@ class ScreenCaptureService : Service() {
         val screenDensity = displayMetrics.densityDpi
         screenWidth = displayMetrics.widthPixels
         screenHeight = displayMetrics.heightPixels
+
+        Log.d(TAG, "Screen dimensions: ${screenWidth}x${screenHeight}, density: $screenDensity")
 
         // ✅ Register MediaProjection.Callback (required on Android 14+)
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
@@ -234,11 +245,14 @@ class ScreenCaptureService : Service() {
             lastCaptureTime = currentTime
 
             val image = reader.acquireLatestImage()
-            if (image != null && isAutomationRunning && isOpenCVInitialized) {
-                processScreenCapture(image)
+            if (image != null) {
+                Log.d(TAG, "Image captured: ${image.width}x${image.height}")
+                if (isAutomationRunning && isOpenCVInitialized) {
+                    processScreenCapture(image)
+                } else {
+                    Log.d(TAG, "Skipping image processing - automation: $isAutomationRunning, opencv: $isOpenCVInitialized")
+                }
                 image.close()
-            } else {
-                image?.close()
             }
         }, Handler(Looper.getMainLooper()))
 
@@ -247,10 +261,13 @@ class ScreenCaptureService : Service() {
 
     private fun processScreenCapture(image: Image) {
         try {
+            Log.d(TAG, "Processing screen capture...")
             val bitmap = imageToBitmap(image)
             if (bitmap != null) {
                 performCardRecognition(bitmap)
                 bitmap.recycle()
+            } else {
+                Log.w(TAG, "Failed to convert image to bitmap")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error processing screen capture", e)
@@ -263,11 +280,19 @@ class ScreenCaptureService : Service() {
         val matchLogic = this.matchLogic ?: return
 
         try {
+            Log.d(TAG, "Performing card recognition on ${screenshot.width}x${screenshot.height} bitmap")
+
             // Use cached positions if available
             val cachedPositions = boardLayoutManager.getCachedPositions()
+            Log.d(TAG, "Cached positions: ${cachedPositions?.size ?: 0}")
 
             // Detect cards
             val detectionResult = cardRecognizer.detectAllCards(screenshot, cachedPositions)
+            Log.d(TAG, "Cards detected: ${detectionResult.cards.size}")
+
+            detectionResult.cards.forEach { card ->
+                Log.d(TAG, "Card: ${card.templateName} at (${card.position.x}, ${card.position.y}) faceUp=${card.isFaceUp}")
+            }
 
             // Validate and update cached positions if needed
             if (cachedPositions != null) {
@@ -301,13 +326,17 @@ class ScreenCaptureService : Service() {
 
             // Update game logic
             val gameUpdate = matchLogic.updateGameState(detectionResult)
+            Log.d(TAG, "Game update: ${gameUpdate.stateChanges.size} changes, ${gameUpdate.availableMatches.size} matches")
 
             // Calculate next move
             val nextMove = matchLogic.calculateNextMove()
+            Log.d(TAG, "Next move: $nextMove")
 
             // Execute move if available
             nextMove?.let { move ->
                 executeMove(move)
+            } ?: run {
+                Log.d(TAG, "No move calculated - waiting or game complete")
             }
 
             // Broadcast game state
@@ -319,7 +348,7 @@ class ScreenCaptureService : Service() {
                 stopAutomation()
             }
 
-            Log.d(TAG, "Recognition cycle completed: ${detectionResult.cards.size} cards detected")
+            Log.d(TAG, "Recognition cycle completed successfully")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error in card recognition", e)
@@ -329,20 +358,24 @@ class ScreenCaptureService : Service() {
     private fun executeMove(move: MatchLogic.NextMove) {
         when (move) {
             is MatchLogic.NextMove.FLIP_CARD -> {
-                simulateTap(move.position.x + move.position.width / 2,
-                    move.position.y + move.position.height / 2)
-                Log.d(TAG, "Executing flip card: ${move.reason}")
+                val centerX = move.position.x + move.position.width / 2
+                val centerY = move.position.y + move.position.height / 2
+                simulateTap(centerX, centerY)
+                Log.d(TAG, "Executing flip card at ($centerX, $centerY): ${move.reason}")
             }
             is MatchLogic.NextMove.MAKE_MATCH -> {
                 // Tap first card
-                simulateTap(move.card1.x + move.card1.width / 2,
-                    move.card1.y + move.card1.height / 2)
+                val centerX1 = move.card1.x + move.card1.width / 2
+                val centerY1 = move.card1.y + move.card1.height / 2
+                simulateTap(centerX1, centerY1)
 
                 // Wait briefly and tap second card
                 captureHandler.postDelayed({
-                    simulateTap(move.card2.x + move.card2.width / 2,
-                        move.card2.y + move.card2.height / 2)
+                    val centerX2 = move.card2.x + move.card2.width / 2
+                    val centerY2 = move.card2.y + move.card2.height / 2
+                    simulateTap(centerX2, centerY2)
                     matchLogic?.recordMatch(move.card1, move.card2)
+                    Log.d(TAG, "Executed match: ($centerX1, $centerY1) -> ($centerX2, $centerY2)")
                 }, 300)
 
                 Log.d(TAG, "Executing match for template ${move.templateIndex}")
@@ -359,6 +392,7 @@ class ScreenCaptureService : Service() {
             putExtra("y", y)
         }
         sendBroadcast(tapIntent)
+        Log.d(TAG, "Sent tap broadcast for ($x, $y)")
     }
 
     fun startAutomation() {
@@ -370,7 +404,7 @@ class ScreenCaptureService : Service() {
         isAutomationRunning = true
         matchLogic?.reset()
         broadcastAutomationState(true)
-        Log.d(TAG, "Automation started")
+        Log.d(TAG, "Automation started - now processing captures")
     }
 
     fun stopAutomation() {
@@ -384,6 +418,7 @@ class ScreenCaptureService : Service() {
             putExtra(EXTRA_IS_RUNNING, isRunning)
         }
         sendBroadcast(intent)
+        Log.d(TAG, "Broadcasted automation state: $isRunning")
     }
 
     private fun broadcastGameState(stats: MatchLogic.GameStats) {
@@ -392,29 +427,35 @@ class ScreenCaptureService : Service() {
             putExtra(EXTRA_GAME_STATS, stats)
         }
         sendBroadcast(intent)
+        Log.d(TAG, "Broadcasted game state: moves=${stats.totalMoves}, matches=${stats.matchesMade}")
     }
 
     private fun imageToBitmap(image: Image): Bitmap? {
-        val planes = image.planes
-        val buffer = planes[0].buffer
-        val pixelStride = planes[0].pixelStride
-        val rowStride = planes[0].rowStride
-        val rowPadding = rowStride - pixelStride * screenWidth
+        try {
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * screenWidth
 
-        val bitmap = Bitmap.createBitmap(
-            screenWidth + rowPadding / pixelStride,
-            screenHeight,
-            Bitmap.Config.RGB_565
-        )
-        bitmap.copyPixelsFromBuffer(buffer)
+            val bitmap = Bitmap.createBitmap(
+                screenWidth + rowPadding / pixelStride,
+                screenHeight,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
 
-        return if (rowPadding == 0) {
-            bitmap
-        } else {
-            // Crop bitmap if there's padding
-            val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
-            bitmap.recycle()
-            croppedBitmap
+            return if (rowPadding == 0) {
+                bitmap
+            } else {
+                // Crop bitmap if there's padding
+                val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                bitmap.recycle()
+                croppedBitmap
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error converting image to bitmap", e)
+            return null
         }
     }
 
@@ -453,6 +494,7 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        Log.d(TAG, "Service onDestroy()")
         stopAutomation()
         virtualDisplay?.release()
         imageReader?.close()
