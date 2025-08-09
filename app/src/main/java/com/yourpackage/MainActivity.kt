@@ -4,8 +4,10 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
@@ -27,6 +29,7 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_SCREEN_CAPTURE = 1000
+        private const val REQUEST_CAPTURE_VIDEO_OUTPUT = 2001
     }
 
     // UI Elements
@@ -70,14 +73,16 @@ class MainActivity : AppCompatActivity() {
     private val screenCapturePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
+        if (result.resultCode == RESULT_OK && result.data != null) {
             screenCaptureResultCode = result.resultCode
             screenCaptureResultData = result.data
             showToast("Screen capture permission granted")
-            Log.d(TAG, "Screen capture permission granted")
+            Log.d(TAG, "Screen capture permission granted - ResultCode: $screenCaptureResultCode")
         } else {
+            screenCaptureResultCode = 0
+            screenCaptureResultData = null
             showToast("Screen capture permission denied")
-            Log.w(TAG, "Screen capture permission denied")
+            Log.w(TAG, "Screen capture permission denied - ResultCode: ${result.resultCode}, Data: ${result.data}")
         }
         updateUI()
     }
@@ -171,33 +176,70 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestScreenCapturePermission() {
-        if (screenCaptureResultCode == 0 || screenCaptureResultData == null) {
+        try {
             val intent = mediaProjectionManager.createScreenCaptureIntent()
+            Log.d(TAG, "Requesting screen capture permission")
             screenCapturePermissionLauncher.launch(intent)
-        } else {
-            showToast("Screen capture permission already granted")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting screen capture permission", e)
+            showToast("Error requesting screen capture permission")
         }
     }
 
     private fun startAutomation() {
-        if (!areAllPermissionsGranted()) {
-            showToast("Please grant all required permissions first")
+        Log.d(TAG, "startAutomation() called")
+
+        // Validate all basic permissions
+        if (!Settings.canDrawOverlays(this)) {
+            showToast("Overlay permission required")
+            Log.w(TAG, "Missing overlay permission")
             return
         }
 
-        // Start ScreenCaptureService first
-        val screenCaptureIntent = Intent(this, ScreenCaptureService::class.java).apply {
-            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, screenCaptureResultCode)
-            putExtra(ScreenCaptureService.EXTRA_RESULT_INTENT, screenCaptureResultData)
+        if (!isAccessibilityServiceEnabled()) {
+            showToast("Accessibility service required")
+            Log.w(TAG, "Missing accessibility service")
+            return
         }
-        ContextCompat.startForegroundService(this, screenCaptureIntent)
 
-        // Start OverlayService
-        val overlayIntent = Intent(this, OverlayService::class.java)
-        startService(overlayIntent)
+        // Validate screen capture permission data
+        if (screenCaptureResultCode != RESULT_OK) {
+            showToast("Screen capture permission not granted - invalid result code")
+            Log.w(TAG, "Invalid screen capture result code: $screenCaptureResultCode (expected: $RESULT_OK)")
+            return
+        }
 
-        showToast("Automation services started")
-        Log.d(TAG, "Automation services started")
+        if (screenCaptureResultData == null) {
+            showToast("Screen capture permission not granted - missing intent data")
+            Log.w(TAG, "Screen capture result data is null")
+            return
+        }
+
+        Log.d(TAG, "All permissions validated, starting services...")
+
+        try {
+            // Start ScreenCaptureService with fresh projection data
+            val screenCaptureIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, screenCaptureResultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_INTENT, screenCaptureResultData)
+            }
+
+            Log.d(TAG, "Starting ScreenCaptureService with resultCode: $screenCaptureResultCode")
+            ContextCompat.startForegroundService(this, screenCaptureIntent)
+
+            // Start OverlayService
+            val overlayIntent = Intent(this, OverlayService::class.java)
+            startService(overlayIntent)
+            Log.d(TAG, "Started OverlayService")
+
+            showToast("Automation services started successfully")
+            Log.d(TAG, "Automation services started successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting automation services", e)
+            showToast("Error starting automation: ${e.message}")
+        }
+
         updateUI()
     }
 
@@ -217,10 +259,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun areAllPermissionsGranted(): Boolean {
-        return Settings.canDrawOverlays(this) &&
-                isAccessibilityServiceEnabled() &&
-                screenCaptureResultCode != 0 &&
-                screenCaptureResultData != null
+        val overlayGranted = Settings.canDrawOverlays(this)
+        val accessibilityGranted = isAccessibilityServiceEnabled()
+        val screenCaptureGranted = screenCaptureResultCode == RESULT_OK && screenCaptureResultData != null
+
+        Log.d(TAG, "Permission check - Overlay: $overlayGranted, Accessibility: $accessibilityGranted, ScreenCapture: $screenCaptureGranted")
+        Log.d(TAG, "Permission details - ResultCode: $screenCaptureResultCode (RESULT_OK=$RESULT_OK), Data null: ${screenCaptureResultData == null}")
+
+        return overlayGranted && accessibilityGranted && screenCaptureGranted
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -239,7 +285,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI() {
         val overlayGranted = Settings.canDrawOverlays(this)
         val accessibilityGranted = isAccessibilityServiceEnabled()
-        val screenCaptureGranted = screenCaptureResultCode != 0 && screenCaptureResultData != null
+        val screenCaptureGranted = screenCaptureResultCode == RESULT_OK && screenCaptureResultData != null
         val allPermissionsGranted = overlayGranted && accessibilityGranted && screenCaptureGranted
 
         // Update button states

@@ -9,6 +9,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.graphics.*
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -47,9 +48,6 @@ class ScreenCaptureService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-
-    private var resultCode: Int = 0
-    private var resultData: Intent? = null
 
     // Recognition components
     private var cardRecognizer: CardRecognizer? = null
@@ -91,10 +89,13 @@ class ScreenCaptureService : Service() {
 
         // Register automation control receiver
         val filter = IntentFilter().apply {
-            addAction(OverlayService.ACTION_START_AUTOMATION)
-            addAction(OverlayService.ACTION_STOP_AUTOMATION)
+            addAction("com.example.fanfanlok.START_AUTOMATION")
+            addAction("com.example.fanfanlok.STOP_AUTOMATION")
         }
-        registerReceiver(automationControlReceiver, filter)
+
+        registerReceiver(automationControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+
+
     }
 
     private fun initializeOpenCV() {
@@ -113,25 +114,57 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private var isProjectionRunning = false
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
-        resultData = intent?.getParcelableExtra(EXTRA_RESULT_INTENT)
+        // If projection is already active, ignore duplicate start
+        if (isProjectionRunning) {
+            Log.w(TAG, "MediaProjection already running; ignoring duplicate start request")
+            return START_NOT_STICKY
+        }
+
+        // Read the fresh permission data from Activity
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_INTENT)
 
         if (resultCode == 0 || resultData == null) {
-            Log.e(TAG, "Invalid result code or data")
+            Log.e(TAG, "Invalid result code or missing resultData — must request fresh projection permission")
             stopSelf()
             return START_NOT_STICKY
         }
 
+        // Start the foreground service before using MediaProjection
+        val notification = createNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        // Get the MediaProjection instance from fresh data
         val mediaProjectionManager =
             getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, resultData!!)
+        mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, resultData)
 
-        startForeground(NOTIFICATION_ID, createNotification())
+        if (mediaProjection == null) {
+            Log.e(TAG, "Failed to obtain MediaProjection")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // Set up virtual display for capture
         setupVirtualDisplay()
+        isProjectionRunning = true
 
-        return START_STICKY
+        Log.d(TAG, "MediaProjection started successfully")
+        return START_NOT_STICKY // Don't restart automatically with stale Intent
     }
+
+
 
     private fun initializeRecognition() {
         if (!isOpenCVInitialized) {
@@ -159,7 +192,24 @@ class ScreenCaptureService : Service() {
         screenWidth = displayMetrics.widthPixels
         screenHeight = displayMetrics.heightPixels
 
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, ImageFormat.RGB_565, 2)
+        // ✅ Register MediaProjection.Callback (required on Android 14+)
+        mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                super.onStop()
+                Log.d(TAG, "MediaProjection stopped")
+
+                // Release virtual display and image reader
+                virtualDisplay?.release()
+                imageReader?.close()
+
+                stopSelf()
+            }
+        }, Handler(Looper.getMainLooper()))
+
+        // Prepare ImageReader
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+
+        // ✅ Only now it's safe to create the virtual display
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             VIRTUAL_DISPLAY_NAME,
             screenWidth,
@@ -171,10 +221,11 @@ class ScreenCaptureService : Service() {
             null
         )
 
+        // Set image available listener
         imageReader?.setOnImageAvailableListener({ reader ->
             val currentTime = System.currentTimeMillis()
 
-            // Rate limit captures for performance
+            // Rate limit captures
             if (currentTime - lastCaptureTime < CAPTURE_INTERVAL_MS) {
                 reader.acquireLatestImage()?.close()
                 return@setOnImageAvailableListener
@@ -189,7 +240,7 @@ class ScreenCaptureService : Service() {
             } else {
                 image?.close()
             }
-        }, null)
+        }, Handler(Looper.getMainLooper()))
 
         Log.d(TAG, "Virtual display setup complete: ${screenWidth}x${screenHeight}")
     }
@@ -406,6 +457,8 @@ class ScreenCaptureService : Service() {
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
+        mediaProjection = null
+        isProjectionRunning = false
         cardRecognizer?.cleanup()
         captureHandler.removeCallbacksAndMessages(null)
 

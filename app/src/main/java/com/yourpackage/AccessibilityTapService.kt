@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Path
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 
@@ -38,13 +39,15 @@ class AccessibilityTapService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         isServiceActive = true
-        
+
         // Register broadcast receiver for tap requests
         val filter = IntentFilter(TAP_ACTION)
-        registerReceiver(tapReceiver, filter)
-        
+
+        registerReceiver(tapReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+
         Log.d(TAG, "Accessibility service connected and ready")
     }
+
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // We don't need to monitor accessibility events for this automation

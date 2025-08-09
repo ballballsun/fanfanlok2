@@ -141,7 +141,7 @@ class OverlayService : Service() {
 
     private fun registerAutomationReceiver() {
         val filter = IntentFilter(ScreenCaptureService.ACTION_AUTOMATION_STATE)
-        registerReceiver(automationStateReceiver, filter)
+        registerReceiver(automationStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
     }
 
     private fun toggleAutomation() {
