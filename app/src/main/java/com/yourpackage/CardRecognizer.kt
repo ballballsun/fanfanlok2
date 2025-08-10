@@ -13,8 +13,8 @@ class CardRecognizer(private val context: Context) {
 
     companion object {
         private const val TAG = "CardRecognizer"
-        private const val MATCH_THRESHOLD = 0.75
-        private const val CARD_BACK_THRESHOLD = 0.8
+        private const val MATCH_THRESHOLD = 0.65 // Lowered for better detection
+        private const val CARD_BACK_THRESHOLD = 0.70 // Lowered for better face-down detection
         private const val ASSETS_CARDS_FOLDER = "cards"
         private const val CARD_BACK_FILENAME = "card_back.png"
     }
@@ -22,7 +22,7 @@ class CardRecognizer(private val context: Context) {
     private val cardTemplates = mutableListOf<Mat>()
     private val templateNames = mutableListOf<String>()
     private var cardBackTemplate: Mat? = null
-    
+
     // Cache for optimization
     private val templateCache = mutableMapOf<String, Mat>()
 
@@ -37,20 +37,20 @@ class CardRecognizer(private val context: Context) {
         try {
             // Load card back template first
             loadCardBackTemplate()
-            
+
             // Load all card templates from assets/cards folder
             val assetManager = context.assets
             val cardFiles = assetManager.list(ASSETS_CARDS_FOLDER) ?: emptyArray()
-            
+
             cardFiles.filter { it.endsWith(".png") || it.endsWith(".jpg") }
                 .filterNot { it == CARD_BACK_FILENAME } // Exclude card back
                 .sorted()
                 .forEach { filename ->
                     loadCardTemplate(filename)
                 }
-                
+
             Log.d(TAG, "Loaded ${cardTemplates.size} card templates and card back template")
-            
+
         } catch (e: IOException) {
             Log.e(TAG, "Failed to load templates", e)
         }
@@ -61,11 +61,11 @@ class CardRecognizer(private val context: Context) {
             val inputStream = context.assets.open("$ASSETS_CARDS_FOLDER/$CARD_BACK_FILENAME")
             val bitmap = BitmapFactory.decodeStream(inputStream)
             inputStream.close()
-            
+
             cardBackTemplate = Mat()
             Utils.bitmapToMat(bitmap, cardBackTemplate!!)
             Imgproc.cvtColor(cardBackTemplate!!, cardBackTemplate!!, Imgproc.COLOR_BGR2GRAY)
-            
+
             Log.d(TAG, "Loaded card back template: $CARD_BACK_FILENAME")
         } catch (e: IOException) {
             Log.e(TAG, "Failed to load card back template", e)
@@ -77,15 +77,15 @@ class CardRecognizer(private val context: Context) {
             val inputStream = context.assets.open("$ASSETS_CARDS_FOLDER/$filename")
             val bitmap = BitmapFactory.decodeStream(inputStream)
             inputStream.close()
-            
+
             val template = Mat()
             Utils.bitmapToMat(bitmap, template)
             Imgproc.cvtColor(template, template, Imgproc.COLOR_BGR2GRAY)
-            
+
             cardTemplates.add(template)
             templateNames.add(filename)
             templateCache[filename] = template
-            
+
             Log.d(TAG, "Loaded card template: $filename")
         } catch (e: IOException) {
             Log.e(TAG, "Failed to load template: $filename", e)
@@ -103,15 +103,32 @@ class CardRecognizer(private val context: Context) {
         val detectedCards = mutableListOf<DetectedCard>()
         val searchRegions = knownPositions ?: detectCardPositions(imgMat)
 
+        Log.d(TAG, "Searching for cards in ${searchRegions.size} regions")
+
         // If we have known positions, search only in those areas for better performance
-        if (knownPositions != null) {
+        if (knownPositions != null && knownPositions.isNotEmpty()) {
             searchRegions.forEach { position ->
-                val cardRegion = Mat(imgMat, position)
-                val cardInfo = analyzeCardRegion(cardRegion, position)
-                if (cardInfo != null) {
-                    detectedCards.add(cardInfo)
+                try {
+                    val cardRegion = Mat(imgMat, position)
+                    val cardInfo = analyzeCardRegion(cardRegion, position)
+                    if (cardInfo != null) {
+                        detectedCards.add(cardInfo)
+                        Log.d(TAG, "Card detected at cached position: ${cardInfo.templateName}, faceUp=${cardInfo.isFaceUp}")
+                    } else {
+                        // If we can't detect anything in a known position, assume it's face-down
+                        detectedCards.add(DetectedCard(
+                            templateIndex = -1,
+                            templateName = "card_back",
+                            position = position,
+                            isFaceUp = false,
+                            confidence = 0.5
+                        ))
+                        Log.d(TAG, "Assuming face-down card at cached position")
+                    }
+                    cardRegion.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error analyzing cached position: ${e.message}")
                 }
-                cardRegion.release()
             }
         } else {
             // Full screen detection - slower but finds new board layouts
@@ -119,11 +136,14 @@ class CardRecognizer(private val context: Context) {
         }
 
         imgMat.release()
-        
-        return CardDetectionResult(
+
+        val result = CardDetectionResult(
             cards = detectedCards,
-            boardPositions = searchRegions
+            boardPositions = if (searchRegions.isNotEmpty()) searchRegions else detectedCards.map { it.position }
         )
+
+        Log.d(TAG, "Detection complete: ${result.cards.size} cards, ${result.boardPositions.size} positions")
+        return result
     }
 
     /**
@@ -131,46 +151,91 @@ class CardRecognizer(private val context: Context) {
      */
     private fun detectCardPositions(imgMat: Mat): List<Rect> {
         val positions = mutableListOf<Rect>()
-        
+
         cardBackTemplate?.let { backTemplate ->
             val result = Mat()
             Imgproc.matchTemplate(imgMat, backTemplate, result, Imgproc.TM_CCOEFF_NORMED)
-            
-            // Find all matches above threshold
-            val matches = mutableListOf<Point>()
-            val mask = Mat.zeros(result.size(), CvType.CV_8UC1)
-            
-            while (true) {
-                val mmr = Core.minMaxLoc(result, mask)
-                if (mmr.maxVal < CARD_BACK_THRESHOLD) break
-                
-                matches.add(mmr.maxLoc)
-                
-                // Mask out the found area to prevent duplicate detections
-                val maskRect = Rect(
-                    (mmr.maxLoc.x - backTemplate.cols() / 2).toInt().coerceAtLeast(0),
-                    (mmr.maxLoc.y - backTemplate.rows() / 2).toInt().coerceAtLeast(0),
-                    backTemplate.cols(),
-                    backTemplate.rows()
-                )
-                Imgproc.rectangle(mask, maskRect, Scalar(255.0), -1)
+
+            // Create a binary mask of potential matches - convert to proper type for findContours
+            val thresholdMat = Mat()
+            Imgproc.threshold(result, thresholdMat, CARD_BACK_THRESHOLD, 255.0, Imgproc.THRESH_BINARY)
+
+            // Convert to CV_8UC1 for findContours
+            val binaryMat = Mat()
+            thresholdMat.convertTo(binaryMat, CvType.CV_8UC1)
+
+            // Find contours to get potential card regions
+            val contours = mutableListOf<MatOfPoint>()
+            val hierarchy = Mat()
+            Imgproc.findContours(binaryMat, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+            // Convert contours to rectangles and filter by size
+            contours.forEach { contour ->
+                val boundingRect = Imgproc.boundingRect(contour)
+
+                // Filter by reasonable card size (adjust these values based on your card dimensions)
+                val minCardArea = 1000 // Minimum card area in pixels
+                val maxCardArea = 50000 // Maximum card area in pixels
+                val area = boundingRect.width * boundingRect.height
+
+                if (area in minCardArea..maxCardArea) {
+                    // Convert OpenCV Rect to org.opencv.core.Rect
+                    val cardRect = Rect(
+                        boundingRect.x,
+                        boundingRect.y,
+                        boundingRect.width,
+                        boundingRect.height
+                    )
+                    positions.add(cardRect)
+                    Log.d(TAG, "Found potential card position: ${cardRect.x},${cardRect.y} ${cardRect.width}x${cardRect.height}")
+                }
+                contour.release()
             }
-            
-            // Convert points to rectangles
-            matches.forEach { point ->
-                positions.add(Rect(
-                    point.x.toInt(),
-                    point.y.toInt(),
-                    backTemplate.cols(),
-                    backTemplate.rows()
-                ))
+
+            // If contour method didn't work well, fall back to template matching
+            if (positions.size < 20) { // Expected around 24 cards
+                positions.clear()
+                positions.addAll(detectCardsByTemplateMatching(result, backTemplate))
             }
-            
+
             result.release()
-            mask.release()
+            thresholdMat.release()
+            binaryMat.release()
+            hierarchy.release()
         }
-        
+
         Log.d(TAG, "Detected ${positions.size} card positions")
+        return positions
+    }
+
+    private fun detectCardsByTemplateMatching(result: Mat, backTemplate: Mat): List<Rect> {
+        val positions = mutableListOf<Rect>()
+        val mask = Mat.zeros(result.size(), CvType.CV_8UC1)
+
+        // Find multiple matches
+        for (i in 0 until 30) { // Try to find up to 30 cards
+            val mmr = Core.minMaxLoc(result, mask)
+            if (mmr.maxVal < CARD_BACK_THRESHOLD) break
+
+            val cardRect = Rect(
+                mmr.maxLoc.x.toInt(),
+                mmr.maxLoc.y.toInt(),
+                backTemplate.cols(),
+                backTemplate.rows()
+            )
+            positions.add(cardRect)
+
+            // Mask out the found area to prevent duplicate detections
+            val maskRect = org.opencv.core.Rect(
+                (mmr.maxLoc.x - backTemplate.cols() / 2).toInt().coerceAtLeast(0),
+                (mmr.maxLoc.y - backTemplate.rows() / 2).toInt().coerceAtLeast(0),
+                backTemplate.cols(),
+                backTemplate.rows()
+            )
+            Imgproc.rectangle(mask, maskRect, Scalar(255.0), -1)
+        }
+
+        mask.release()
         return positions
     }
 
@@ -184,7 +249,7 @@ class CardRecognizer(private val context: Context) {
             Imgproc.matchTemplate(cardRegion, backTemplate, backResult, Imgproc.TM_CCOEFF_NORMED)
             val backMatch = Core.minMaxLoc(backResult)
             backResult.release()
-            
+
             if (backMatch.maxVal >= CARD_BACK_THRESHOLD) {
                 return DetectedCard(
                     templateIndex = -1, // -1 indicates face-down card
@@ -195,17 +260,17 @@ class CardRecognizer(private val context: Context) {
                 )
             }
         }
-        
+
         // Check against all card templates to find face-up cards
         var bestMatch: DetectedCard? = null
         var bestConfidence = 0.0
-        
+
         cardTemplates.forEachIndexed { index, template ->
             val result = Mat()
             Imgproc.matchTemplate(cardRegion, template, result, Imgproc.TM_CCOEFF_NORMED)
             val match = Core.minMaxLoc(result)
             result.release()
-            
+
             if (match.maxVal >= MATCH_THRESHOLD && match.maxVal > bestConfidence) {
                 bestConfidence = match.maxVal
                 bestMatch = DetectedCard(
@@ -217,7 +282,7 @@ class CardRecognizer(private val context: Context) {
                 )
             }
         }
-        
+
         return bestMatch
     }
 
@@ -226,19 +291,20 @@ class CardRecognizer(private val context: Context) {
      */
     private fun performFullScreenDetection(imgMat: Mat): List<DetectedCard> {
         val detectedCards = mutableListOf<DetectedCard>()
-        
-        // Detect face-down cards first
+
+        // Detect face-down cards first (most common in initial state)
         cardBackTemplate?.let { backTemplate ->
             detectCardsOfType(imgMat, backTemplate, -1, "card_back", false)
                 .forEach { detectedCards.add(it) }
         }
-        
+
         // Detect face-up cards
         cardTemplates.forEachIndexed { index, template ->
             detectCardsOfType(imgMat, template, index, templateNames[index], true)
                 .forEach { detectedCards.add(it) }
         }
-        
+
+        Log.d(TAG, "Full screen detection found ${detectedCards.size} cards")
         return detectedCards
     }
 
@@ -254,23 +320,26 @@ class CardRecognizer(private val context: Context) {
     ): List<DetectedCard> {
         val results = mutableListOf<DetectedCard>()
         val result = Mat()
-        
+
         Imgproc.matchTemplate(imgMat, template, result, Imgproc.TM_CCOEFF_NORMED)
-        
+
         val threshold = if (isFaceUp) MATCH_THRESHOLD else CARD_BACK_THRESHOLD
         val mask = Mat.zeros(result.size(), CvType.CV_8UC1)
-        
-        while (true) {
+
+        // For face-down cards, we want to find more matches (up to 24)
+        val maxMatches = if (isFaceUp) 4 else 30 // Face-down cards can appear many times
+
+        for (i in 0 until maxMatches) {
             val mmr = Core.minMaxLoc(result, mask)
             if (mmr.maxVal < threshold) break
-            
+
             val position = Rect(
                 mmr.maxLoc.x.toInt(),
                 mmr.maxLoc.y.toInt(),
                 template.cols(),
                 template.rows()
             )
-            
+
             results.add(DetectedCard(
                 templateIndex = templateIndex,
                 templateName = templateName,
@@ -278,9 +347,9 @@ class CardRecognizer(private val context: Context) {
                 isFaceUp = isFaceUp,
                 confidence = mmr.maxVal
             ))
-            
+
             // Mask out this detection to find other instances
-            val maskRect = Rect(
+            val maskRect = org.opencv.core.Rect(
                 (mmr.maxLoc.x - template.cols() / 2).toInt().coerceAtLeast(0),
                 (mmr.maxLoc.y - template.rows() / 2).toInt().coerceAtLeast(0),
                 template.cols(),
@@ -288,9 +357,11 @@ class CardRecognizer(private val context: Context) {
             )
             Imgproc.rectangle(mask, maskRect, Scalar(255.0), -1)
         }
-        
+
         result.release()
         mask.release()
+
+        Log.d(TAG, "Found ${results.size} instances of $templateName (faceUp: $isFaceUp)")
         return results
     }
 
