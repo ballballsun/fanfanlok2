@@ -37,12 +37,12 @@ class ScreenCaptureService : Service() {
         const val EXTRA_RESULT_INTENT = "result_intent"
         const val TAG = "ScreenCapture"
         const val VIRTUAL_DISPLAY_NAME = "ScreenCapture"
-        const val CAPTURE_INTERVAL_MS = 500L // Capture every 500ms for performance
+        const val CAPTURE_INTERVAL_MS = 1000L // Slower capture for static board detection
 
         // Service state broadcast actions
         const val ACTION_AUTOMATION_STATE = "com.example.fanfanlok.AUTOMATION_STATE"
         const val EXTRA_IS_RUNNING = "is_running"
-        const val EXTRA_GAME_STATS = "game_stats"
+        const val EXTRA_DETECTION_COUNT = "detection_count"
     }
 
     private var mediaProjection: MediaProjection? = null
@@ -52,12 +52,12 @@ class ScreenCaptureService : Service() {
     // Recognition components
     private var cardRecognizer: CardRecognizer? = null
     private var boardLayoutManager: BoardLayoutManager? = null
-    private var matchLogic: MatchLogic? = null
 
-    // Automation state
-    private var isAutomationRunning = false
+    // Detection state
+    private var isDetectionRunning = false
     private var captureHandler = Handler(Looper.getMainLooper())
     private var lastCaptureTime = 0L
+    private var detectionCount = 0
 
     // Screen dimensions
     private var screenWidth = 0
@@ -66,26 +66,26 @@ class ScreenCaptureService : Service() {
     // OpenCV initialization state
     private var isOpenCVInitialized = false
 
-    // Game detection state
-    private var initialGameDetected = false
-    private var gameDetectionAttempts = 0
-    private val maxGameDetectionAttempts = 10
+    // Static board detection state
+    private var staticLayoutDetected = false
+    private var detectionAttempts = 0
+    private val maxDetectionAttempts = 5
 
     // Projection state
     private var isProjectionRunning = false
 
-    // Broadcast receiver for automation control
-    private val automationControlReceiver = object : BroadcastReceiver() {
+    // Broadcast receiver for detection control
+    private val detectionControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "Received automation control: ${intent?.action}")
+            Log.d(TAG, "Received detection control: ${intent?.action}")
             when (intent?.action) {
                 OverlayService.ACTION_START_AUTOMATION -> {
-                    Log.d(TAG, "Processing START_AUTOMATION broadcast")
-                    startAutomation()
+                    Log.d(TAG, "Processing START_DETECTION broadcast")
+                    startDetection()
                 }
                 OverlayService.ACTION_STOP_AUTOMATION -> {
-                    Log.d(TAG, "Processing STOP_AUTOMATION broadcast")
-                    stopAutomation()
+                    Log.d(TAG, "Processing STOP_DETECTION broadcast")
+                    stopDetection()
                 }
                 "com.example.fanfanlok.REQUEST_DETECTION" -> {
                     Log.d(TAG, "Processing REQUEST_DETECTION broadcast")
@@ -103,11 +103,11 @@ class ScreenCaptureService : Service() {
         // Initialize OpenCV synchronously
         initializeOpenCV()
 
-        // Register automation control receiver - FIXED: Register immediately in onCreate
-        registerAutomationControlReceiver()
+        // Register detection control receiver
+        registerDetectionControlReceiver()
     }
 
-    private fun registerAutomationControlReceiver() {
+    private fun registerDetectionControlReceiver() {
         val filter = IntentFilter().apply {
             addAction(OverlayService.ACTION_START_AUTOMATION)
             addAction(OverlayService.ACTION_STOP_AUTOMATION)
@@ -115,20 +115,14 @@ class ScreenCaptureService : Service() {
         }
 
         try {
-            // Try different registration flags based on Android version
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(automationControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                registerReceiver(detectionControlReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
-                registerReceiver(automationControlReceiver, filter)
+                registerReceiver(detectionControlReceiver, filter)
             }
-            Log.d(TAG, "Automation control receiver registered successfully with actions: ${filter.countActions()}")
-
-            // Log the registered actions for debugging
-            for (i in 0 until filter.countActions()) {
-                Log.d(TAG, "Registered action [$i]: ${filter.getAction(i)}")
-            }
+            Log.d(TAG, "Detection control receiver registered successfully")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to register automation control receiver", e)
+            Log.e(TAG, "Failed to register detection control receiver", e)
         }
     }
 
@@ -157,19 +151,19 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
-        // Read the fresh permission data from Activity
+        // Read the permission data from Activity
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
         val resultData = intent?.getParcelableExtra<Intent>(EXTRA_RESULT_INTENT)
 
         Log.d(TAG, "Result code: $resultCode, Result data: $resultData")
 
         if (resultCode == 0 || resultData == null) {
-            Log.e(TAG, "Invalid result code or missing resultData — must request fresh projection permission")
+            Log.e(TAG, "Invalid result code or missing resultData")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // Start the foreground service before using MediaProjection
+        // Start the foreground service
         val notification = createNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -181,7 +175,7 @@ class ScreenCaptureService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        // Get the MediaProjection instance from fresh data
+        // Get the MediaProjection instance
         val mediaProjectionManager =
             getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, resultData)
@@ -196,9 +190,8 @@ class ScreenCaptureService : Service() {
         setupVirtualDisplay()
         isProjectionRunning = true
 
-        // REMOVED AUTO-START - Let overlay control the start
-        Log.d(TAG, "MediaProjection started successfully - waiting for automation start command")
-        return START_NOT_STICKY // Don't restart automatically with stale Intent
+        Log.d(TAG, "MediaProjection started successfully - ready for detection")
+        return START_NOT_STICKY
     }
 
     private fun initializeRecognition() {
@@ -210,7 +203,6 @@ class ScreenCaptureService : Service() {
         try {
             cardRecognizer = CardRecognizer(this)
             boardLayoutManager = BoardLayoutManager(this)
-            matchLogic = MatchLogic()
 
             Log.d(TAG, "Recognition components initialized successfully")
         } catch (e: Exception) {
@@ -229,16 +221,13 @@ class ScreenCaptureService : Service() {
 
         Log.d(TAG, "Screen dimensions: ${screenWidth}x${screenHeight}, density: $screenDensity")
 
-        // ✅ Register MediaProjection.Callback (required on Android 14+)
+        // Register MediaProjection.Callback
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
                 super.onStop()
                 Log.d(TAG, "MediaProjection stopped")
-
-                // Release virtual display and image reader
                 virtualDisplay?.release()
                 imageReader?.close()
-
                 stopSelf()
             }
         }, Handler(Looper.getMainLooper()))
@@ -246,7 +235,7 @@ class ScreenCaptureService : Service() {
         // Prepare ImageReader
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
 
-        // ✅ Only now it's safe to create the virtual display
+        // Create virtual display
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             VIRTUAL_DISPLAY_NAME,
             screenWidth,
@@ -273,10 +262,8 @@ class ScreenCaptureService : Service() {
             val image = reader.acquireLatestImage()
             if (image != null) {
                 Log.d(TAG, "Image captured: ${image.width}x${image.height}")
-                if (isAutomationRunning && isOpenCVInitialized) {
+                if (isDetectionRunning && isOpenCVInitialized) {
                     processScreenCapture(image)
-                } else {
-                    Log.d(TAG, "Skipping image processing - automation: $isAutomationRunning, opencv: $isOpenCVInitialized")
                 }
                 image.close()
             }
@@ -287,10 +274,10 @@ class ScreenCaptureService : Service() {
 
     private fun processScreenCapture(image: Image) {
         try {
-            Log.d(TAG, "Processing screen capture...")
+            Log.d(TAG, "Processing screen capture for card detection...")
             val bitmap = imageToBitmap(image)
             if (bitmap != null) {
-                performCardRecognition(bitmap)
+                performCardDetection(bitmap)
                 bitmap.recycle()
             } else {
                 Log.w(TAG, "Failed to convert image to bitmap")
@@ -300,115 +287,57 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun performCardRecognition(screenshot: Bitmap) {
+    private fun performCardDetection(screenshot: Bitmap) {
         val cardRecognizer = this.cardRecognizer ?: return
         val boardLayoutManager = this.boardLayoutManager ?: return
-        val matchLogic = this.matchLogic ?: return
 
         try {
-            Log.d(TAG, "Performing card recognition on ${screenshot.width}x${screenshot.height} bitmap")
+            Log.d(TAG, "Performing card detection on ${screenshot.width}x${screenshot.height} bitmap")
 
-            // Use cached positions if available and initial game has been detected
-            val cachedPositions = if (initialGameDetected) boardLayoutManager.getCachedPositions() else null
-            Log.d(TAG, "Cached positions: ${cachedPositions?.size ?: 0}")
-
-            // Detect cards
-            val detectionResult = cardRecognizer.detectAllCards(screenshot, cachedPositions)
+            // Detect cards using edge detection and contour analysis
+            val detectionResult = cardRecognizer.detectAllCards(screenshot)
             Log.d(TAG, "Cards detected: ${detectionResult.cards.size}")
 
-            detectionResult.cards.forEach { card ->
-                Log.d(TAG, "Card: ${card.templateName} at (${card.position.x}, ${card.position.y}) faceUp=${card.isFaceUp}")
+            detectionResult.cards.forEachIndexed { index, card ->
+                Log.d(TAG, "Card $index: at (${card.position.x}, ${card.position.y}) ${card.position.width}x${card.position.height}")
             }
 
-            // Check for initial game state detection
-            if (!initialGameDetected) {
-                val faceDownCount = detectionResult.cards.count { !it.isFaceUp }
-                Log.d(TAG, "Initial game detection: found $faceDownCount face-down cards")
+            // Check if we have enough cards for a static layout
+            if (!staticLayoutDetected && detectionResult.cards.size >= 10) { // Expect at least 10 cards
+                staticLayoutDetected = true
+                Log.d(TAG, "Static board layout detected! Found ${detectionResult.cards.size} cards")
 
-                if (faceDownCount >= 20) { // At least 20 face-down cards suggests game start
-                    initialGameDetected = true
-                    Log.d(TAG, "Initial game state detected! Found $faceDownCount face-down cards")
-
-                    // Save the board layout
-                    boardLayoutManager.saveBoardLayout(
-                        detectionResult.boardPositions,
-                        screenWidth,
-                        screenHeight
-                    )
-                } else {
-                    gameDetectionAttempts++
-                    if (gameDetectionAttempts >= maxGameDetectionAttempts) {
-                        Log.w(TAG, "Could not detect initial game state after $maxGameDetectionAttempts attempts")
-                        // Continue anyway, maybe the game is already in progress
-                        initialGameDetected = true
-                    } else {
-                        Log.d(TAG, "Waiting for game to start... attempt $gameDetectionAttempts/$maxGameDetectionAttempts")
-                        return // Skip processing until we detect the initial state
-                    }
-                }
-            }
-
-            // Validate and update cached positions if needed
-            if (cachedPositions != null) {
-                val validation = boardLayoutManager.validatePositions(detectionResult.boardPositions)
-                when (validation) {
-                    BoardLayoutManager.ValidationResult.MISMATCH -> {
-                        Log.d(TAG, "Layout mismatch, updating cached positions")
-                        boardLayoutManager.updateCachedPositions(
-                            detectionResult.boardPositions,
-                            screenWidth,
-                            screenHeight
-                        )
-                    }
-                    BoardLayoutManager.ValidationResult.PARTIAL_MATCH -> {
-                        Log.d(TAG, "Partial layout match, minor adjustment")
-                        // Could implement minor position adjustments here
-                    }
-                    else -> {
-                        // MATCH or NO_CACHE - no action needed
-                    }
-                }
-            } else if (detectionResult.boardPositions.isNotEmpty()) {
-                // Save newly detected positions
+                // Save the static board layout
                 boardLayoutManager.saveBoardLayout(
                     detectionResult.boardPositions,
                     screenWidth,
                     screenHeight
                 )
-                Log.d(TAG, "Saved new board layout with ${detectionResult.boardPositions.size} positions")
             }
 
-            // Update game logic
-            val gameUpdate = matchLogic.updateGameState(detectionResult)
-            Log.d(TAG, "Game update: ${gameUpdate.stateChanges.size} changes, ${gameUpdate.availableMatches.size} matches")
-
-            // Calculate next move
-            val nextMove = matchLogic.calculateNextMove()
-            Log.d(TAG, "Next move: $nextMove")
-
-            // Execute move if available
-            nextMove?.let { move ->
-                executeMove(move)
-            } ?: run {
-                Log.d(TAG, "No move calculated - waiting or game complete")
-            }
+            // Update detection count
+            detectionCount++
 
             // Broadcast detection results to overlay
             broadcastDetectionResults(detectionResult.cards)
 
-            // Broadcast game state
-            broadcastGameState(matchLogic.getGameStats())
+            // Broadcast detection state
+            broadcastDetectionState()
 
-            // Check if game is complete
-            if (matchLogic.isGameComplete()) {
-                Log.d(TAG, "Game completed!")
-                stopAutomation()
+            Log.d(TAG, "Detection cycle completed successfully - attempt ${detectionAttempts + 1}")
+            detectionAttempts++
+
+            // Stop detection after successful layout detection or max attempts
+            if (staticLayoutDetected || detectionAttempts >= maxDetectionAttempts) {
+                if (staticLayoutDetected) {
+                    Log.d(TAG, "Static layout saved, continuing periodic detection for overlay")
+                } else {
+                    Log.w(TAG, "Max detection attempts reached without finding sufficient cards")
+                }
             }
 
-            Log.d(TAG, "Recognition cycle completed successfully")
-
         } catch (e: Exception) {
-            Log.e(TAG, "Error in card recognition", e)
+            Log.e(TAG, "Error in card detection", e)
         }
     }
 
@@ -423,7 +352,7 @@ class ScreenCaptureService : Service() {
                     Log.d(TAG, "Processing on-demand detection request")
                     val bitmap = imageToBitmap(image)
                     if (bitmap != null) {
-                        performDetectionOnly(bitmap)
+                        performCardDetection(bitmap)
                         bitmap.recycle()
                     }
                     image.close()
@@ -436,29 +365,6 @@ class ScreenCaptureService : Service() {
         }
     }
 
-    private fun performDetectionOnly(screenshot: Bitmap) {
-        val cardRecognizer = this.cardRecognizer ?: return
-        val boardLayoutManager = this.boardLayoutManager ?: return
-
-        try {
-            Log.d(TAG, "Performing detection-only on ${screenshot.width}x${screenshot.height} bitmap")
-
-            // Use cached positions if available
-            val cachedPositions = boardLayoutManager.getCachedPositions()
-            Log.d(TAG, "Using cached positions: ${cachedPositions?.size ?: 0}")
-
-            // Detect cards
-            val detectionResult = cardRecognizer.detectAllCards(screenshot, cachedPositions)
-            Log.d(TAG, "Detection-only completed: ${detectionResult.cards.size} cards")
-
-            // Broadcast just the detection results
-            broadcastDetectionResults(detectionResult.cards)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in detection-only", e)
-        }
-    }
-
     private fun broadcastDetectionResults(cards: List<CardRecognizer.DetectedCard>) {
         val parcelableCards = cards.map { DetectedCardParcelable.fromDetectedCard(it) }
         val intent = Intent(OverlayService.ACTION_CARD_DETECTION_UPDATE).apply {
@@ -468,87 +374,38 @@ class ScreenCaptureService : Service() {
         Log.d(TAG, "Broadcasted detection results: ${cards.size} cards")
     }
 
-    private fun executeMove(move: MatchLogic.NextMove) {
-        when (move) {
-            is MatchLogic.NextMove.FLIP_CARD -> {
-                val centerX = move.position.x + move.position.width / 2
-                val centerY = move.position.y + move.position.height / 2
-                simulateTap(centerX, centerY)
-                Log.d(TAG, "Executing flip card at ($centerX, $centerY): ${move.reason}")
-            }
-            is MatchLogic.NextMove.MAKE_MATCH -> {
-                // Tap first card
-                val centerX1 = move.card1.x + move.card1.width / 2
-                val centerY1 = move.card1.y + move.card1.height / 2
-                simulateTap(centerX1, centerY1)
-
-                // Wait briefly and tap second card
-                captureHandler.postDelayed({
-                    val centerX2 = move.card2.x + move.card2.width / 2
-                    val centerY2 = move.card2.y + move.card2.height / 2
-                    simulateTap(centerX2, centerY2)
-                    matchLogic?.recordMatch(move.card1, move.card2)
-                    Log.d(TAG, "Executed match: ($centerX1, $centerY1) -> ($centerX2, $centerY2)")
-                }, 300)
-
-                Log.d(TAG, "Executing match for template ${move.templateIndex}")
-            }
-        }
-
-        matchLogic?.recordMove()
-    }
-
-    private fun simulateTap(x: Int, y: Int) {
-        // Send broadcast to accessibility service to perform tap
-        val tapIntent = Intent("com.example.fanfanlok.PERFORM_TAP").apply {
-            putExtra("x", x)
-            putExtra("y", y)
-        }
-        sendBroadcast(tapIntent)
-        Log.d(TAG, "Sent tap broadcast for ($x, $y)")
-    }
-
-    fun startAutomation() {
+    fun startDetection() {
         if (!isOpenCVInitialized) {
-            Log.e(TAG, "Cannot start automation - OpenCV not initialized")
-            broadcastAutomationState(false)
+            Log.e(TAG, "Cannot start detection - OpenCV not initialized")
+            broadcastDetectionState()
             return
         }
 
-        Log.d(TAG, "Starting automation - OpenCV initialized: $isOpenCVInitialized")
-        isAutomationRunning = true
-        initialGameDetected = false // Reset game detection
-        gameDetectionAttempts = 0
-        matchLogic?.reset()
+        Log.d(TAG, "Starting card detection - OpenCV initialized: $isOpenCVInitialized")
+        isDetectionRunning = true
+        staticLayoutDetected = false // Reset detection state
+        detectionAttempts = 0
+        detectionCount = 0
         boardLayoutManager?.clearCache() // Clear cache for fresh detection
-        broadcastAutomationState(true)
-        Log.d(TAG, "Automation started - now processing captures")
+        broadcastDetectionState()
+        Log.d(TAG, "Detection started - now processing captures")
     }
 
-    fun stopAutomation() {
-        Log.d(TAG, "Stopping automation")
-        isAutomationRunning = false
-        initialGameDetected = false
-        gameDetectionAttempts = 0
-        broadcastAutomationState(false)
-        Log.d(TAG, "Automation stopped")
+    fun stopDetection() {
+        Log.d(TAG, "Stopping card detection")
+        isDetectionRunning = false
+        detectionAttempts = 0
+        broadcastDetectionState()
+        Log.d(TAG, "Detection stopped")
     }
 
-    private fun broadcastAutomationState(isRunning: Boolean) {
+    private fun broadcastDetectionState() {
         val intent = Intent(ACTION_AUTOMATION_STATE).apply {
-            putExtra(EXTRA_IS_RUNNING, isRunning)
+            putExtra(EXTRA_IS_RUNNING, isDetectionRunning)
+            putExtra(EXTRA_DETECTION_COUNT, detectionCount)
         }
         sendBroadcast(intent)
-        Log.d(TAG, "Broadcasted automation state: $isRunning")
-    }
-
-    private fun broadcastGameState(stats: MatchLogic.GameStats) {
-        val intent = Intent(ACTION_AUTOMATION_STATE).apply {
-            putExtra(EXTRA_IS_RUNNING, isAutomationRunning)
-            putExtra(EXTRA_GAME_STATS, stats)
-        }
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcasted game state: moves=${stats.totalMoves}, matches=${stats.matchesMade}")
+        Log.d(TAG, "Broadcasted detection state: running=$isDetectionRunning, count=$detectionCount")
     }
 
     private fun imageToBitmap(image: Image): Bitmap? {
@@ -591,8 +448,8 @@ class ScreenCaptureService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Card Game Automation Running")
-            .setContentText(if (isAutomationRunning) "Actively playing game" else "Ready to play")
+            .setContentTitle("Card Detection Running")
+            .setContentText(if (isDetectionRunning) "Detecting card positions" else "Ready to detect")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -603,10 +460,10 @@ class ScreenCaptureService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Card Game Automation Service",
+                "Card Detection Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Shows status of card game automation"
+                description = "Shows status of card position detection"
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -616,7 +473,7 @@ class ScreenCaptureService : Service() {
 
     override fun onDestroy() {
         Log.d(TAG, "Service onDestroy()")
-        stopAutomation()
+        stopDetection()
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
@@ -626,8 +483,8 @@ class ScreenCaptureService : Service() {
         captureHandler.removeCallbacksAndMessages(null)
 
         try {
-            unregisterReceiver(automationControlReceiver)
-            Log.d(TAG, "Automation control receiver unregistered")
+            unregisterReceiver(detectionControlReceiver)
+            Log.d(TAG, "Detection control receiver unregistered")
         } catch (e: Exception) {
             Log.w(TAG, "Error unregistering receiver", e)
         }

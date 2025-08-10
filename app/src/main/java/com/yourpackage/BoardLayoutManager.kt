@@ -8,7 +8,7 @@ import kotlinx.serialization.*
 import kotlinx.serialization.json.*
 
 /**
- * Manages board layout detection and caching for faster subsequent recognitions
+ * Manages static board layout for card position detection
  */
 class BoardLayoutManager(private val context: Context) {
 
@@ -16,19 +16,19 @@ class BoardLayoutManager(private val context: Context) {
         private const val TAG = "BoardLayoutManager"
         private const val PREFS_NAME = "board_layouts"
         private const val KEY_ENABLE_CACHE = "enable_position_cache"
-        private const val KEY_CURRENT_LAYOUT = "current_layout"
-        private const val POSITION_TOLERANCE = 20 // pixels tolerance for position matching
+        private const val KEY_STATIC_LAYOUT = "static_layout"
+        private const val POSITION_TOLERANCE = 30 // Increased tolerance for static board
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
-    
-    private var currentLayout: BoardLayout? = null
+
+    private var staticLayout: StaticBoardLayout? = null
     private var isCacheEnabled: Boolean = true
 
     init {
         isCacheEnabled = prefs.getBoolean(KEY_ENABLE_CACHE, true)
-        loadCurrentLayout()
+        loadStaticLayout()
     }
 
     /**
@@ -37,98 +37,131 @@ class BoardLayoutManager(private val context: Context) {
     fun setPositionCacheEnabled(enabled: Boolean) {
         isCacheEnabled = enabled
         prefs.edit().putBoolean(KEY_ENABLE_CACHE, enabled).apply()
-        
+
         if (!enabled) {
             clearCache()
         }
-        
+
         Log.d(TAG, "Position cache ${if (enabled) "enabled" else "disabled"}")
     }
 
     fun isPositionCacheEnabled(): Boolean = isCacheEnabled
 
     /**
-     * Get cached board positions if available and cache is enabled
+     * Get static board positions if available and cache is enabled
      */
     fun getCachedPositions(): List<Rect>? {
-        return if (isCacheEnabled && currentLayout != null) {
-            currentLayout?.cardPositions?.map { it.toRect() }
+        return if (isCacheEnabled && staticLayout != null) {
+            staticLayout?.cardPositions?.map { it.toRect() }
         } else {
             null
         }
     }
 
     /**
-     * Save detected board layout for future use
+     * Save detected board layout as static layout
      */
     fun saveBoardLayout(positions: List<Rect>, screenWidth: Int, screenHeight: Int) {
         if (!isCacheEnabled) return
 
-        val layout = BoardLayout(
-            cardPositions = positions.map { SerializableRect.fromRect(it) },
+        // Filter and sort positions for consistency
+        val filteredPositions = filterAndSortPositions(positions)
+
+        val layout = StaticBoardLayout(
+            cardPositions = filteredPositions.map { SerializableRect.fromRect(it) },
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            detectedAt = System.currentTimeMillis()
+            savedAt = System.currentTimeMillis(),
+            positionCount = filteredPositions.size
         )
 
-        currentLayout = layout
-        
+        staticLayout = layout
+
         try {
             val layoutJson = json.encodeToString(layout)
-            prefs.edit().putString(KEY_CURRENT_LAYOUT, layoutJson).apply()
-            Log.d(TAG, "Saved board layout with ${positions.size} positions")
+            prefs.edit().putString(KEY_STATIC_LAYOUT, layoutJson).apply()
+            Log.d(TAG, "Saved static board layout with ${filteredPositions.size} positions")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save board layout", e)
+            Log.e(TAG, "Failed to save static board layout", e)
         }
+    }
+
+    /**
+     * Filter and sort positions for consistent layout
+     */
+    private fun filterAndSortPositions(positions: List<Rect>): List<Rect> {
+        // Remove duplicates (positions that are too close to each other)
+        val filtered = mutableListOf<Rect>()
+
+        positions.forEach { pos ->
+            val isDuplicate = filtered.any { existing ->
+                isPositionSimilar(pos, existing)
+            }
+
+            if (!isDuplicate) {
+                filtered.add(pos)
+            }
+        }
+
+        // Sort positions by row then column (top-left to bottom-right)
+        val sorted = filtered.sortedWith(compareBy<Rect> { it.y }.thenBy { it.x })
+
+        Log.d(TAG, "Filtered positions: ${positions.size} -> ${filtered.size}, sorted by position")
+        return sorted
     }
 
     /**
      * Check if current layout is still valid for the given screen dimensions
      */
     fun isLayoutValid(screenWidth: Int, screenHeight: Int): Boolean {
-        return currentLayout?.let { layout ->
-            isCacheEnabled && 
-            layout.screenWidth == screenWidth && 
-            layout.screenHeight == screenHeight &&
-            isLayoutRecentlyDetected(layout)
+        return staticLayout?.let { layout ->
+            isCacheEnabled &&
+                    layout.screenWidth == screenWidth &&
+                    layout.screenHeight == screenHeight
         } ?: false
     }
 
     /**
-     * Validate detected positions against cached layout
+     * Validate detected positions against static layout
      */
     fun validatePositions(detectedPositions: List<Rect>): ValidationResult {
         val cachedPositions = getCachedPositions() ?: return ValidationResult.NO_CACHE
-        
-        if (cachedPositions.size != detectedPositions.size) {
-            Log.d(TAG, "Position count mismatch: cached=${cachedPositions.size}, detected=${detectedPositions.size}")
-            return ValidationResult.MISMATCH
-        }
+
+        Log.d(TAG, "Validating ${detectedPositions.size} detected vs ${cachedPositions.size} cached positions")
 
         var matchingPositions = 0
+        var totalExpected = cachedPositions.size
+
         cachedPositions.forEach { cached ->
             val hasMatch = detectedPositions.any { detected ->
                 isPositionSimilar(cached, detected)
             }
-            if (hasMatch) matchingPositions++
+            if (hasMatch) {
+                matchingPositions++
+                Log.v(TAG, "Found match for cached position (${cached.x}, ${cached.y})")
+            } else {
+                Log.v(TAG, "No match for cached position (${cached.x}, ${cached.y})")
+            }
         }
 
-        val matchRate = matchingPositions.toFloat() / cachedPositions.size
-        
+        val matchRate = if (totalExpected > 0) matchingPositions.toFloat() / totalExpected else 0f
+
+        Log.d(TAG, "Position validation: $matchingPositions/$totalExpected matched (${matchRate * 100}%)")
+
         return when {
-            matchRate >= 0.9f -> ValidationResult.MATCH
-            matchRate >= 0.7f -> ValidationResult.PARTIAL_MATCH
+            matchRate >= 0.8f -> ValidationResult.MATCH
+            matchRate >= 0.5f -> ValidationResult.PARTIAL_MATCH
             else -> ValidationResult.MISMATCH
         }
     }
 
     /**
-     * Update cached positions with newly detected ones (for minor adjustments)
+     * Update static layout with newly detected positions
      */
-    fun updateCachedPositions(newPositions: List<Rect>, screenWidth: Int, screenHeight: Int) {
+    fun updateStaticLayout(newPositions: List<Rect>, screenWidth: Int, screenHeight: Int) {
         if (!isCacheEnabled) return
-        
-        Log.d(TAG, "Updating cached positions with ${newPositions.size} new positions")
+
+        Log.d(TAG, "Updating static layout with ${newPositions.size} new positions")
         saveBoardLayout(newPositions, screenWidth, screenHeight)
     }
 
@@ -136,9 +169,9 @@ class BoardLayoutManager(private val context: Context) {
      * Clear all cached layouts
      */
     fun clearCache() {
-        currentLayout = null
-        prefs.edit().remove(KEY_CURRENT_LAYOUT).apply()
-        Log.d(TAG, "Board layout cache cleared")
+        staticLayout = null
+        prefs.edit().remove(KEY_STATIC_LAYOUT).apply()
+        Log.d(TAG, "Static board layout cache cleared")
     }
 
     /**
@@ -147,45 +180,41 @@ class BoardLayoutManager(private val context: Context) {
     fun getCacheStats(): CacheStats {
         return CacheStats(
             isEnabled = isCacheEnabled,
-            hasLayout = currentLayout != null,
-            positionCount = currentLayout?.cardPositions?.size ?: 0,
-            lastDetectedAt = currentLayout?.detectedAt,
-            screenResolution = currentLayout?.let { "${it.screenWidth}x${it.screenHeight}" }
+            hasLayout = staticLayout != null,
+            positionCount = staticLayout?.positionCount ?: 0,
+            lastDetectedAt = staticLayout?.savedAt,
+            screenResolution = staticLayout?.let { "${it.screenWidth}x${it.screenHeight}" }
         )
     }
 
-    private fun loadCurrentLayout() {
+    private fun loadStaticLayout() {
         try {
-            val layoutJson = prefs.getString(KEY_CURRENT_LAYOUT, null)
+            val layoutJson = prefs.getString(KEY_STATIC_LAYOUT, null)
             if (layoutJson != null) {
-                currentLayout = json.decodeFromString<BoardLayout>(layoutJson)
-                Log.d(TAG, "Loaded cached board layout with ${currentLayout?.cardPositions?.size} positions")
+                staticLayout = json.decodeFromString<StaticBoardLayout>(layoutJson)
+                Log.d(TAG, "Loaded static board layout with ${staticLayout?.positionCount} positions")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load cached layout", e)
-            currentLayout = null
+            Log.e(TAG, "Failed to load static layout", e)
+            staticLayout = null
         }
     }
 
-    private fun isLayoutRecentlyDetected(layout: BoardLayout): Boolean {
-        val maxAge = 24 * 60 * 60 * 1000L // 24 hours in milliseconds
-        return System.currentTimeMillis() - layout.detectedAt < maxAge
-    }
-
     private fun isPositionSimilar(pos1: Rect, pos2: Rect): Boolean {
-        return Math.abs(pos1.x - pos2.x) <= POSITION_TOLERANCE &&
-               Math.abs(pos1.y - pos2.y) <= POSITION_TOLERANCE &&
-               Math.abs(pos1.width - pos2.width) <= POSITION_TOLERANCE &&
-               Math.abs(pos1.height - pos2.height) <= POSITION_TOLERANCE
+        return kotlin.math.abs(pos1.x - pos2.x) <= POSITION_TOLERANCE &&
+                kotlin.math.abs(pos1.y - pos2.y) <= POSITION_TOLERANCE &&
+                kotlin.math.abs(pos1.width - pos2.width) <= POSITION_TOLERANCE &&
+                kotlin.math.abs(pos1.height - pos2.height) <= POSITION_TOLERANCE
     }
 
     // Data classes
     @Serializable
-    data class BoardLayout(
+    data class StaticBoardLayout(
         val cardPositions: List<SerializableRect>,
         val screenWidth: Int,
         val screenHeight: Int,
-        val detectedAt: Long
+        val savedAt: Long,
+        val positionCount: Int
     )
 
     @Serializable
@@ -196,17 +225,17 @@ class BoardLayoutManager(private val context: Context) {
         val height: Int
     ) {
         fun toRect() = Rect(x, y, width, height)
-        
+
         companion object {
             fun fromRect(rect: Rect) = SerializableRect(rect.x, rect.y, rect.width, rect.height)
         }
     }
 
     enum class ValidationResult {
-        MATCH,           // Positions match cached layout
-        PARTIAL_MATCH,   // Most positions match (70-90%)
-        MISMATCH,        // Positions don't match cached layout
-        NO_CACHE         // No cached layout available
+        MATCH,           // Positions match static layout
+        PARTIAL_MATCH,   // Most positions match (50-80%)
+        MISMATCH,        // Positions don't match static layout
+        NO_CACHE         // No static layout available
     }
 
     data class CacheStats(

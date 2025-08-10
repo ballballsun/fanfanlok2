@@ -23,7 +23,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import org.opencv.core.Rect
 
 class OverlayService : Service() {
 
@@ -33,14 +32,11 @@ class OverlayService : Service() {
         const val ACTION_STOP_AUTOMATION = "com.example.fanfanlok.STOP_AUTOMATION"
         const val ACTION_CARD_DETECTION_UPDATE = "com.example.fanfanlok.CARD_DETECTION_UPDATE"
         const val EXTRA_DETECTED_CARDS = "detected_cards"
-
-        // Debug mode flag - set to true for real-time detection, false for cached positions
-        private const val DEBUG_USE_REALTIME_DETECTION = true
     }
 
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: View
-    private var isAutomationRunning = false
+    private var isDetectionRunning = false
     private var isShowingDetection = false
 
     // UI Elements
@@ -54,18 +50,18 @@ class OverlayService : Service() {
     private var detectionOverlay: DetectionOverlayView? = null
     private var currentDetectedCards = listOf<CardRecognizer.DetectedCard>()
 
-    // Broadcast receiver for automation state updates
-    private val automationStateReceiver = object : BroadcastReceiver() {
+    // Broadcast receiver for detection state updates
+    private val detectionStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "Received automation state broadcast: ${intent?.action}")
+            Log.d(TAG, "Received detection state broadcast: ${intent?.action}")
             when (intent?.action) {
                 ScreenCaptureService.ACTION_AUTOMATION_STATE -> {
                     val isRunning = intent.getBooleanExtra(ScreenCaptureService.EXTRA_IS_RUNNING, false)
-                    val stats = intent.getParcelableExtra<MatchLogic.GameStats>(ScreenCaptureService.EXTRA_GAME_STATS)
+                    val detectionCount = intent.getIntExtra(ScreenCaptureService.EXTRA_DETECTION_COUNT, 0)
 
-                    Log.d(TAG, "Automation state updated: $isRunning")
-                    updateAutomationState(isRunning)
-                    stats?.let { updateGameStats(it) }
+                    Log.d(TAG, "Detection state updated: running=$isRunning, count=$detectionCount")
+                    updateDetectionState(isRunning)
+                    updateDetectionStats(detectionCount)
                 }
                 ACTION_CARD_DETECTION_UPDATE -> {
                     @Suppress("DEPRECATION")
@@ -74,9 +70,6 @@ class OverlayService : Service() {
                     detectedCards?.let { cards ->
                         currentDetectedCards = cards.map { it.toDetectedCard() }
                         Log.d(TAG, "Converted to ${currentDetectedCards.size} DetectedCard objects")
-                        currentDetectedCards.forEachIndexed { index, card ->
-                            Log.d(TAG, "Card $index: ${card.templateName} at (${card.position.x}, ${card.position.y}) ${card.position.width}x${card.position.height}")
-                        }
                         if (isShowingDetection) {
                             Log.d(TAG, "Updating detection overlay...")
                             updateDetectionOverlay()
@@ -95,7 +88,7 @@ class OverlayService : Service() {
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         setupOverlayView()
-        registerAutomationReceiver()
+        registerDetectionReceiver()
     }
 
     private fun setupOverlayView() {
@@ -164,8 +157,8 @@ class OverlayService : Service() {
 
         // Set up button actions
         btnToggle.setOnClickListener {
-            Log.d(TAG, "Toggle button clicked, current state: $isAutomationRunning")
-            toggleAutomation()
+            Log.d(TAG, "Toggle button clicked, current state: $isDetectionRunning")
+            toggleDetection()
         }
 
         btnShow.setOnClickListener {
@@ -227,13 +220,13 @@ class OverlayService : Service() {
         })
     }
 
-    private fun registerAutomationReceiver() {
+    private fun registerDetectionReceiver() {
         val filter = IntentFilter().apply {
             addAction(ScreenCaptureService.ACTION_AUTOMATION_STATE)
             addAction(ACTION_CARD_DETECTION_UPDATE)
         }
-        registerReceiver(automationStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        Log.d(TAG, "Automation state receiver registered")
+        registerReceiver(detectionStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        Log.d(TAG, "Detection state receiver registered")
     }
 
     private fun showDetection() {
@@ -243,53 +236,25 @@ class OverlayService : Service() {
         }
 
         isShowingDetection = true
-        Log.d(TAG, "showDetection() called - DEBUG_USE_REALTIME_DETECTION = $DEBUG_USE_REALTIME_DETECTION")
+        Log.d(TAG, "showDetection() called - requesting current detection")
 
-        if (DEBUG_USE_REALTIME_DETECTION) {
-            // Request current detection from ScreenCaptureService
-            val intent = Intent("com.example.fanfanlok.REQUEST_DETECTION")
-            sendBroadcast(intent)
-            Log.d(TAG, "Sent REQUEST_DETECTION broadcast")
-            Toast.makeText(this, "🔍 Requesting current card detection...", Toast.LENGTH_SHORT).show()
+        // Request current detection from ScreenCaptureService
+        val intent = Intent("com.example.fanfanlok.REQUEST_DETECTION")
+        sendBroadcast(intent)
+        Log.d(TAG, "Sent REQUEST_DETECTION broadcast")
+        Toast.makeText(this, "🔍 Requesting current card detection...", Toast.LENGTH_SHORT).show()
 
-            // Set a timeout to show status after 3 seconds
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (currentDetectedCards.isEmpty()) {
-                    Log.w(TAG, "No detection results received after 3 seconds")
-                    Toast.makeText(this, "⚠️ No detection results received", Toast.LENGTH_LONG).show()
-                } else {
-                    Log.d(TAG, "Detection results received: ${currentDetectedCards.size} cards")
-                }
-            }, 3000)
-        } else {
-            // Use cached positions (simpler for debug)
-            val boardLayoutManager = BoardLayoutManager(this)
-            val cachedPositions = boardLayoutManager.getCachedPositions()
-
-            Log.d(TAG, "Cached positions: ${cachedPositions?.size ?: 0}")
-
-            if (cachedPositions != null && cachedPositions.isNotEmpty()) {
-                // Convert cached positions to DetectedCard format
-                currentDetectedCards = cachedPositions.mapIndexed { index, rect ->
-                    CardRecognizer.DetectedCard(
-                        templateIndex = -1,
-                        templateName = "cached_position_$index",
-                        position = rect,
-                        isFaceUp = false,
-                        confidence = 1.0
-                    )
-                }
-                Log.d(TAG, "Created ${currentDetectedCards.size} cached cards for display")
-                updateDetectionOverlay()
-                Toast.makeText(this, "📍 Showing ${cachedPositions.size} cached positions", Toast.LENGTH_SHORT).show()
+        // Set a timeout to show status after 2 seconds
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (currentDetectedCards.isEmpty()) {
+                Log.w(TAG, "No detection results received after 2 seconds")
+                Toast.makeText(this, "⚠️ No detection results received", Toast.LENGTH_LONG).show()
+                // Keep isShowingDetection true in case results arrive later
             } else {
-                Log.w(TAG, "No cached positions available")
-                val cacheStats = boardLayoutManager.getCacheStats()
-                Log.d(TAG, "Cache stats: enabled=${cacheStats.isEnabled}, hasLayout=${cacheStats.hasLayout}, count=${cacheStats.positionCount}")
-                Toast.makeText(this, "❌ No cached positions available", Toast.LENGTH_SHORT).show()
-                isShowingDetection = false
+                Log.d(TAG, "Detection results received: ${currentDetectedCards.size} cards")
+                Toast.makeText(this, "✅ Showing ${currentDetectedCards.size} detected cards", Toast.LENGTH_SHORT).show()
             }
-        }
+        }, 2000)
 
         updateUI()
     }
@@ -341,7 +306,6 @@ class OverlayService : Service() {
             }
         } else {
             Log.w(TAG, "No cards to display in overlay")
-            Toast.makeText(this, "⚠️ No cards detected to display", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -357,83 +321,77 @@ class OverlayService : Service() {
         }
     }
 
-    private fun toggleAutomation() {
-        Log.d(TAG, "toggleAutomation called, current state: $isAutomationRunning")
-        // FIXED: Corrected the logic - when NOT running, START it
-        if (!isAutomationRunning) {
-            startAutomation()
+    private fun toggleDetection() {
+        Log.d(TAG, "toggleDetection called, current state: $isDetectionRunning")
+        if (!isDetectionRunning) {
+            startDetection()
         } else {
-            stopAutomation()
+            stopDetection()
         }
     }
 
-    private fun startAutomation() {
-        Log.d(TAG, "startAutomation called - sending broadcast")
+    private fun startDetection() {
+        Log.d(TAG, "startDetection called - sending broadcast")
 
         // Update local state immediately for UI responsiveness
-        isAutomationRunning = true
+        isDetectionRunning = true
         updateUI()
 
         // Send broadcast with explicit targeting to ensure delivery
         val intent = Intent(ACTION_START_AUTOMATION).apply {
-            // Add explicit package targeting to ensure broadcast delivery
             setPackage(packageName)
-            // Add flags for better broadcast delivery
             addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
         }
 
         sendBroadcast(intent)
-        Log.d(TAG, "Sent START_AUTOMATION broadcast with package: $packageName")
+        Log.d(TAG, "Sent START_AUTOMATION broadcast")
 
-        Toast.makeText(this, "🚀 Starting Automation...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "🚀 Starting Card Detection...", Toast.LENGTH_SHORT).show()
     }
 
-    private fun stopAutomation() {
-        Log.d(TAG, "stopAutomation called - sending broadcast")
+    private fun stopDetection() {
+        Log.d(TAG, "stopDetection called - sending broadcast")
 
         // Update local state immediately for UI responsiveness
-        isAutomationRunning = false
+        isDetectionRunning = false
         updateUI()
 
         // Send broadcast with explicit targeting to ensure delivery
         val intent = Intent(ACTION_STOP_AUTOMATION).apply {
-            // Add explicit package targeting to ensure broadcast delivery
             setPackage(packageName)
-            // Add flags for better broadcast delivery
             addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
         }
 
         sendBroadcast(intent)
-        Log.d(TAG, "Sent STOP_AUTOMATION broadcast with package: $packageName")
+        Log.d(TAG, "Sent STOP_AUTOMATION broadcast")
 
-        Toast.makeText(this, "⏹️ Stopping Automation...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "⏹️ Stopping Detection...", Toast.LENGTH_SHORT).show()
     }
 
-    private fun updateAutomationState(isRunning: Boolean) {
-        Log.d(TAG, "updateAutomationState: $isRunning")
-        isAutomationRunning = isRunning
+    private fun updateDetectionState(isRunning: Boolean) {
+        Log.d(TAG, "updateDetectionState: $isRunning")
+        isDetectionRunning = isRunning
         updateUI()
     }
 
-    private fun updateGameStats(stats: MatchLogic.GameStats) {
+    private fun updateDetectionStats(detectionCount: Int) {
         val statsText = """
-            Moves: ${stats.totalMoves}
-            Matches: ${stats.matchesMade}
-            Cards Left: ${stats.cardsRemaining}
-            Revealed: ${stats.revealedCount}
+            Detections: $detectionCount
+            Cards Found: ${currentDetectedCards.size}
+            Showing: ${if (isShowingDetection) "Yes" else "No"}
         """.trimIndent()
 
         tvStats.text = statsText
-        Log.d(TAG, "Updated game stats: moves=${stats.totalMoves}, matches=${stats.matchesMade}")
+        Log.d(TAG, "Updated detection stats: count=$detectionCount, cards=${currentDetectedCards.size}")
     }
 
     private fun updateUI() {
-        Log.d(TAG, "updateUI called, automation running: $isAutomationRunning, showing detection: $isShowingDetection")
+        Log.d(TAG, "updateUI called, detection running: $isDetectionRunning, showing detection: $isShowingDetection")
 
         // Update toggle button
-        btnToggle.text = if (isAutomationRunning) "⏹️ STOP" else "▶️ START"
+        btnToggle.text = if (isDetectionRunning) "⏹️ STOP" else "▶️ START"
         btnToggle.setBackgroundColor(
-            if (isAutomationRunning)
+            if (isDetectionRunning)
                 android.graphics.Color.parseColor("#FF6B6B") // Red for stop
             else
                 android.graphics.Color.parseColor("#4ECDC4") // Green for start
@@ -445,16 +403,16 @@ class OverlayService : Service() {
 
         // Update status text
         tvStatus.text = when {
-            isAutomationRunning && isShowingDetection -> "🤖🔍 PLAYING + SHOWING"
-            isAutomationRunning -> "🤖 PLAYING..."
-            isShowingDetection -> "🔍 SHOWING DETECTION"
+            isDetectionRunning && isShowingDetection -> "🔍👁️ DETECTING + SHOWING"
+            isDetectionRunning -> "🔍 DETECTING..."
+            isShowingDetection -> "👁️ SHOWING OVERLAY"
             else -> "⏸️ Ready"
         }
 
         // Set status text color
         tvStatus.setTextColor(
             when {
-                isAutomationRunning -> android.graphics.Color.parseColor("#4CAF50") // Green
+                isDetectionRunning -> android.graphics.Color.parseColor("#4CAF50") // Green
                 isShowingDetection -> android.graphics.Color.parseColor("#2196F3") // Blue
                 else -> android.graphics.Color.parseColor("#9E9E9E") // Gray
             }
@@ -469,8 +427,8 @@ class OverlayService : Service() {
         hideDetection() // Clean up detection overlay
 
         try {
-            unregisterReceiver(automationStateReceiver)
-            Log.d(TAG, "Automation receiver unregistered")
+            unregisterReceiver(detectionStateReceiver)
+            Log.d(TAG, "Detection receiver unregistered")
         } catch (e: Exception) {
             Log.w(TAG, "Error unregistering receiver", e)
         }
@@ -496,14 +454,14 @@ class OverlayService : Service() {
         private val paint = Paint().apply {
             color = Color.RED
             style = Paint.Style.STROKE
-            strokeWidth = 6f
-            alpha = 200 // Semi-transparent
+            strokeWidth = 8f
+            alpha = 220 // Semi-transparent
         }
 
         private val fillPaint = Paint().apply {
             color = Color.RED
             style = Paint.Style.FILL
-            alpha = 50 // Very transparent fill
+            alpha = 30 // Very transparent fill
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -524,7 +482,7 @@ class OverlayService : Service() {
                 // Draw border
                 canvas.drawRect(left, top, right, bottom, paint)
 
-                Log.v(TAG, "Drew rectangle for ${card.templateName} at (${rect.x}, ${rect.y}) ${rect.width}x${rect.height}")
+                Log.v(TAG, "Drew rectangle at (${rect.x}, ${rect.y}) ${rect.width}x${rect.height}")
             }
         }
     }
