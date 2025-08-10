@@ -71,6 +71,9 @@ class ScreenCaptureService : Service() {
     private var gameDetectionAttempts = 0
     private val maxGameDetectionAttempts = 10
 
+    // Projection state
+    private var isProjectionRunning = false
+
     // Broadcast receiver for automation control
     private val automationControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -83,6 +86,10 @@ class ScreenCaptureService : Service() {
                 OverlayService.ACTION_STOP_AUTOMATION -> {
                     Log.d(TAG, "Processing STOP_AUTOMATION broadcast")
                     stopAutomation()
+                }
+                "com.example.fanfanlok.REQUEST_DETECTION" -> {
+                    Log.d(TAG, "Processing REQUEST_DETECTION broadcast")
+                    requestCurrentDetection()
                 }
             }
         }
@@ -104,6 +111,7 @@ class ScreenCaptureService : Service() {
         val filter = IntentFilter().apply {
             addAction(OverlayService.ACTION_START_AUTOMATION)
             addAction(OverlayService.ACTION_STOP_AUTOMATION)
+            addAction("com.example.fanfanlok.REQUEST_DETECTION")
         }
 
         try {
@@ -139,8 +147,6 @@ class ScreenCaptureService : Service() {
             isOpenCVInitialized = false
         }
     }
-
-    private var isProjectionRunning = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand called with intent: $intent")
@@ -387,6 +393,9 @@ class ScreenCaptureService : Service() {
                 Log.d(TAG, "No move calculated - waiting or game complete")
             }
 
+            // Broadcast detection results to overlay
+            broadcastDetectionResults(detectionResult.cards)
+
             // Broadcast game state
             broadcastGameState(matchLogic.getGameStats())
 
@@ -401,6 +410,62 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error in card recognition", e)
         }
+    }
+
+    private fun requestCurrentDetection() {
+        Log.d(TAG, "Requesting current detection...")
+
+        // Try to capture current state immediately
+        imageReader?.let { reader ->
+            try {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    Log.d(TAG, "Processing on-demand detection request")
+                    val bitmap = imageToBitmap(image)
+                    if (bitmap != null) {
+                        performDetectionOnly(bitmap)
+                        bitmap.recycle()
+                    }
+                    image.close()
+                } else {
+                    Log.w(TAG, "No image available for on-demand detection")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing on-demand detection", e)
+            }
+        }
+    }
+
+    private fun performDetectionOnly(screenshot: Bitmap) {
+        val cardRecognizer = this.cardRecognizer ?: return
+        val boardLayoutManager = this.boardLayoutManager ?: return
+
+        try {
+            Log.d(TAG, "Performing detection-only on ${screenshot.width}x${screenshot.height} bitmap")
+
+            // Use cached positions if available
+            val cachedPositions = boardLayoutManager.getCachedPositions()
+            Log.d(TAG, "Using cached positions: ${cachedPositions?.size ?: 0}")
+
+            // Detect cards
+            val detectionResult = cardRecognizer.detectAllCards(screenshot, cachedPositions)
+            Log.d(TAG, "Detection-only completed: ${detectionResult.cards.size} cards")
+
+            // Broadcast just the detection results
+            broadcastDetectionResults(detectionResult.cards)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in detection-only", e)
+        }
+    }
+
+    private fun broadcastDetectionResults(cards: List<CardRecognizer.DetectedCard>) {
+        val parcelableCards = cards.map { DetectedCardParcelable.fromDetectedCard(it) }
+        val intent = Intent(OverlayService.ACTION_CARD_DETECTION_UPDATE).apply {
+            putParcelableArrayListExtra(OverlayService.EXTRA_DETECTED_CARDS, ArrayList(parcelableCards))
+        }
+        sendBroadcast(intent)
+        Log.d(TAG, "Broadcasted detection results: ${cards.size} cards")
     }
 
     private fun executeMove(move: MatchLogic.NextMove) {
