@@ -74,6 +74,47 @@ class ScreenCaptureService : Service() {
     // Projection state
     private var isProjectionRunning = false
 
+    // Store last detected cards for showing overlay when detection is stopped
+    private var lastDetectedCards = listOf<CardRecognizer.DetectedCard>()
+
+    private fun requestScreenshotForHelper() {
+        Log.d(TAG, "Capturing screenshot for helper edge detection")
+
+        imageReader?.let { reader ->
+            try {
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    val bitmap = imageToBitmap(image)
+                    if (bitmap != null) {
+                        // Convert bitmap to byte array for transmission
+                        val stream = java.io.ByteArrayOutputStream()
+                        bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+                        val byteArray = stream.toByteArray()
+
+                        // Send screenshot data to overlay service
+                        val intent = Intent("com.example.fanfanlok.SCREENSHOT_FOR_HELPER").apply {
+                            putExtra("screenshot_data", byteArray)
+                        }
+                        sendBroadcast(intent)
+
+                        Log.d(TAG, "Screenshot sent to helper: ${bitmap.width}x${bitmap.height}")
+                        bitmap.recycle()
+                        stream.close()
+                    } else {
+                        Log.w(TAG, "Failed to convert image to bitmap for helper")
+                    }
+                    image.close()
+                } else {
+                    Log.w(TAG, "No image available for helper screenshot")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error capturing screenshot for helper", e)
+            }
+        } ?: run {
+            Log.w(TAG, "ImageReader not available for helper screenshot")
+        }
+    }
+
     // Broadcast receiver for detection control
     private val detectionControlReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -90,6 +131,10 @@ class ScreenCaptureService : Service() {
                 "com.example.fanfanlok.REQUEST_DETECTION" -> {
                     Log.d(TAG, "Processing REQUEST_DETECTION broadcast")
                     requestCurrentDetection()
+                }
+                "com.example.fanfanlok.REQUEST_SCREENSHOT_FOR_HELPER" -> {
+                    Log.d(TAG, "Processing REQUEST_SCREENSHOT_FOR_HELPER broadcast")
+                    requestScreenshotForHelper()
                 }
             }
         }
@@ -302,6 +347,9 @@ class ScreenCaptureService : Service() {
                 Log.d(TAG, "Card $index: at (${card.position.x}, ${card.position.y}) ${card.position.width}x${card.position.height}")
             }
 
+            // Store last detected cards for overlay use
+            lastDetectedCards = detectionResult.cards
+
             // Check if we have enough cards for a static layout
             if (!staticLayoutDetected && detectionResult.cards.size >= 10) { // Expect at least 10 cards
                 staticLayoutDetected = true
@@ -344,34 +392,53 @@ class ScreenCaptureService : Service() {
     private fun requestCurrentDetection() {
         Log.d(TAG, "Requesting current detection...")
 
-        // Try to capture current state immediately
-        imageReader?.let { reader ->
-            try {
-                val image = reader.acquireLatestImage()
-                if (image != null) {
-                    Log.d(TAG, "Processing on-demand detection request")
-                    val bitmap = imageToBitmap(image)
-                    if (bitmap != null) {
-                        performCardDetection(bitmap)
-                        bitmap.recycle()
+        // Check if we have stored cards from previous detection
+        if (lastDetectedCards.isNotEmpty()) {
+            Log.d(TAG, "Broadcasting last detected cards: ${lastDetectedCards.size} cards")
+            broadcastDetectionResults(lastDetectedCards)
+            return
+        }
+
+        // If no stored cards and detection is running, try to capture current state
+        if (isDetectionRunning) {
+            imageReader?.let { reader ->
+                try {
+                    val image = reader.acquireLatestImage()
+                    if (image != null) {
+                        Log.d(TAG, "Processing on-demand detection request")
+                        val bitmap = imageToBitmap(image)
+                        if (bitmap != null) {
+                            performCardDetection(bitmap)
+                            bitmap.recycle()
+                        }
+                        image.close()
+                    } else {
+                        Log.w(TAG, "No image available for on-demand detection")
                     }
-                    image.close()
-                } else {
-                    Log.w(TAG, "No image available for on-demand detection")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing on-demand detection", e)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error processing on-demand detection", e)
             }
+        } else {
+            Log.w(TAG, "No stored cards and detection not running - cannot provide detection results")
+            // Still try to broadcast empty results to reset overlay state
+            broadcastDetectionResults(emptyList())
         }
     }
 
     private fun broadcastDetectionResults(cards: List<CardRecognizer.DetectedCard>) {
-        val parcelableCards = cards.map { DetectedCardParcelable.fromDetectedCard(it) }
-        val intent = Intent(OverlayService.ACTION_CARD_DETECTION_UPDATE).apply {
-            putParcelableArrayListExtra(OverlayService.EXTRA_DETECTED_CARDS, ArrayList(parcelableCards))
+        try {
+            val parcelableCards = cards.map { DetectedCardParcelable.fromDetectedCard(it) }
+            val intent = Intent(OverlayService.ACTION_CARD_DETECTION_UPDATE).apply {
+                putParcelableArrayListExtra(OverlayService.EXTRA_DETECTED_CARDS, ArrayList(parcelableCards))
+                setPackage(packageName) // Ensure it stays within our app
+                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            }
+            sendBroadcast(intent)
+            Log.d(TAG, "Broadcasted detection results: ${cards.size} cards")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error broadcasting detection results", e)
         }
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcasted detection results: ${cards.size} cards")
     }
 
     fun startDetection() {
@@ -400,12 +467,18 @@ class ScreenCaptureService : Service() {
     }
 
     private fun broadcastDetectionState() {
-        val intent = Intent(ACTION_AUTOMATION_STATE).apply {
-            putExtra(EXTRA_IS_RUNNING, isDetectionRunning)
-            putExtra(EXTRA_DETECTION_COUNT, detectionCount)
+        try {
+            val intent = Intent(ACTION_AUTOMATION_STATE).apply {
+                putExtra(EXTRA_IS_RUNNING, isDetectionRunning)
+                putExtra(EXTRA_DETECTION_COUNT, detectionCount)
+                setPackage(packageName) // Ensure it stays within our app
+                addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+            }
+            sendBroadcast(intent)
+            Log.d(TAG, "Broadcasted detection state: running=$isDetectionRunning, count=$detectionCount")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error broadcasting detection state", e)
         }
-        sendBroadcast(intent)
-        Log.d(TAG, "Broadcasted detection state: running=$isDetectionRunning, count=$detectionCount")
     }
 
     private fun imageToBitmap(image: Image): Bitmap? {

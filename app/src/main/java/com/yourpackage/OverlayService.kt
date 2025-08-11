@@ -1,4 +1,37 @@
-package com.example.fanfanlok
+private fun initializeHelperComponents() {
+    helperSettings = HelperSettings(this)
+    manualCardHelper = ManualCardHelper(this)
+
+    // Set up helper mode listener
+    manualCardHelper.setOnHelperModeChangedListener { isActive ->
+        isHelperModeActive = isActive
+        updateUI()
+
+        if (isActive) {
+            showCardPositionOverlay()
+        } else {
+            hideCardPositionOverlay()
+        }
+    }
+
+    // Set up screenshot request listener
+    manualCardHelper.setOnScreenshotRequestListener {
+        requestScreenshotForEdgeDetection()
+    }
+
+    Log.d(TAG, "Helper components initialized")
+}
+
+private fun requestScreenshotForEdgeDetection() {
+    Log.d(TAG, "Requesting screenshot for edge detection")
+
+    // Request screenshot from ScreenCaptureService
+    val intent = Intent("com.example.fanfanlok.REQUEST_SCREENSHOT_FOR_HELPER")
+    sendBroadcast(intent)
+
+    // Show user feedback
+    Toast.makeText(this, "📸 Capturing screen for card detection...", Toast.LENGTH_SHORT).show()
+}package com.example.fanfanlok
 
 import android.app.Service
 import android.content.BroadcastReceiver
@@ -23,6 +56,9 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.example.fanfanlok.helper.ManualCardHelper
+import com.example.fanfanlok.helper.CardPositionOverlay
+import com.example.fanfanlok.helper.HelperSettings
 
 class OverlayService : Service() {
 
@@ -38,17 +74,24 @@ class OverlayService : Service() {
     private lateinit var overlayView: View
     private var isDetectionRunning = false
     private var isShowingDetection = false
+    private var isHelperModeActive = false
 
     // UI Elements
     private lateinit var btnToggle: Button
     private lateinit var btnShow: Button
     private lateinit var btnHide: Button
+    private lateinit var btnHelper: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvStats: TextView
 
     // Detection visualization
     private var detectionOverlay: DetectionOverlayView? = null
     private var currentDetectedCards = listOf<CardRecognizer.DetectedCard>()
+
+    // Manual card helper components
+    private lateinit var manualCardHelper: ManualCardHelper
+    private lateinit var helperSettings: HelperSettings
+    private var cardPositionOverlay: CardPositionOverlay? = null
 
     // Broadcast receiver for detection state updates
     private val detectionStateReceiver = object : BroadcastReceiver() {
@@ -78,7 +121,34 @@ class OverlayService : Service() {
                         Log.w(TAG, "Received null detection cards")
                     }
                 }
+                "com.example.fanfanlok.SCREENSHOT_FOR_HELPER" -> {
+                    // Handle screenshot response for helper
+                    val screenshotData = intent.getByteArrayExtra("screenshot_data")
+                    if (screenshotData != null) {
+                        Log.d(TAG, "Received screenshot for helper edge detection")
+                        handleScreenshotForHelper(screenshotData)
+                    }
+                }
             }
+        }
+    }
+
+    private fun handleScreenshotForHelper(screenshotData: ByteArray) {
+        try {
+            // Convert byte array back to bitmap
+            val bitmap = android.graphics.BitmapFactory.decodeByteArray(screenshotData, 0, screenshotData.size)
+            if (bitmap != null) {
+                // Pass screenshot to helper for edge detection
+                manualCardHelper.setCurrentScreenshot(bitmap)
+                Log.d(TAG, "Screenshot provided to helper: ${bitmap.width}x${bitmap.height}")
+                Toast.makeText(this, "✅ Ready for card detection - tap on cards", Toast.LENGTH_SHORT).show()
+            } else {
+                Log.e(TAG, "Failed to decode screenshot bitmap")
+                Toast.makeText(this, "❌ Screenshot capture failed", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling screenshot for helper", e)
+            Toast.makeText(this, "❌ Screenshot processing failed", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -87,8 +157,31 @@ class OverlayService : Service() {
         Log.d(TAG, "OverlayService onCreate")
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        // Initialize helper components
+        initializeHelperComponents()
+
         setupOverlayView()
         registerDetectionReceiver()
+    }
+
+    private fun initializeHelperComponents() {
+        helperSettings = HelperSettings(this)
+        manualCardHelper = ManualCardHelper(this)
+
+        // Set up helper mode listener
+        manualCardHelper.setOnHelperModeChangedListener { isActive ->
+            isHelperModeActive = isActive
+            updateUI()
+
+            if (isActive) {
+                showCardPositionOverlay()
+            } else {
+                hideCardPositionOverlay()
+            }
+        }
+
+        Log.d(TAG, "Helper components initialized")
     }
 
     private fun setupOverlayView() {
@@ -100,7 +193,7 @@ class OverlayService : Service() {
         tvStatus = overlayView.findViewById(R.id.tv_status)
         tvStats = overlayView.findViewById(R.id.tv_stats)
 
-        // Create show/hide buttons programmatically
+        // Create show/hide/helper buttons programmatically
         val buttonContainer = overlayView.findViewById<LinearLayout>(R.id.button_container)
 
         btnShow = Button(this).apply {
@@ -130,8 +223,22 @@ class OverlayService : Service() {
             }
         }
 
+        btnHelper = Button(this).apply {
+            text = "🎯 HELPER"
+            setBackgroundColor(Color.parseColor("#9C27B0")) // Purple
+            setTextColor(Color.WHITE)
+            setPadding(16, 8, 16, 8)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(4, 4, 4, 4)
+            }
+        }
+
         buttonContainer.addView(btnShow)
         buttonContainer.addView(btnHide)
+        buttonContainer.addView(btnHelper)
 
         // Layout parameters for the floating window
         val params = WindowManager.LayoutParams(
@@ -171,12 +278,110 @@ class OverlayService : Service() {
             hideDetection()
         }
 
+        btnHelper.setOnClickListener {
+            Log.d(TAG, "Helper button clicked")
+            toggleHelperMode()
+        }
+
         // Enable drag & move for the overlay
         setupDragAndDrop(params)
 
         // Initialize UI
         updateUI()
         Log.d(TAG, "Overlay view setup complete")
+    }
+
+    private fun toggleHelperMode() {
+        Log.d(TAG, "Toggling helper mode, current state: $isHelperModeActive")
+
+        if (isHelperModeActive) {
+            stopHelperMode()
+        } else {
+            startHelperMode()
+        }
+    }
+
+    private fun startHelperMode() {
+        Log.d(TAG, "Starting helper mode")
+
+        // Stop detection and hide detection overlay if active
+        if (isDetectionRunning) {
+            stopDetection()
+        }
+        if (isShowingDetection) {
+            hideDetection()
+        }
+
+        // Start helper mode
+        manualCardHelper.startHelperMode()
+
+        Toast.makeText(this, "🎯 Helper Mode Active - Tap to add cards", Toast.LENGTH_LONG).show()
+        Log.d(TAG, "Helper mode started")
+    }
+
+    private fun stopHelperMode() {
+        Log.d(TAG, "Stopping helper mode")
+
+        // Show save dialog or auto-save
+        val cardCount = manualCardHelper.getCardCount()
+        if (cardCount > 0) {
+            manualCardHelper.stopHelperMode(savePositions = true)
+            Toast.makeText(this, "✅ Helper Mode Stopped - $cardCount cards saved", Toast.LENGTH_LONG).show()
+        } else {
+            manualCardHelper.stopHelperMode(savePositions = false)
+            Toast.makeText(this, "🎯 Helper Mode Stopped", Toast.LENGTH_SHORT).show()
+        }
+
+        Log.d(TAG, "Helper mode stopped with $cardCount cards")
+    }
+
+    private fun showCardPositionOverlay() {
+        if (cardPositionOverlay != null) {
+            Log.d(TAG, "Card position overlay already showing")
+            return
+        }
+
+        Log.d(TAG, "Showing card position overlay")
+
+        try {
+            cardPositionOverlay = CardPositionOverlay(this, manualCardHelper, helperSettings)
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+
+            // Position to cover entire screen
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = 0
+            params.y = 0
+
+            windowManager.addView(cardPositionOverlay, params)
+            Log.d(TAG, "Card position overlay added successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to add card position overlay", e)
+            Toast.makeText(this, "❌ Failed to show helper overlay: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun hideCardPositionOverlay() {
+        cardPositionOverlay?.let { overlay ->
+            try {
+                windowManager.removeView(overlay)
+                Log.d(TAG, "Card position overlay removed")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error removing card position overlay", e)
+            }
+            cardPositionOverlay = null
+        }
     }
 
     private fun setupDragAndDrop(params: WindowManager.LayoutParams) {
@@ -224,6 +429,7 @@ class OverlayService : Service() {
         val filter = IntentFilter().apply {
             addAction(ScreenCaptureService.ACTION_AUTOMATION_STATE)
             addAction(ACTION_CARD_DETECTION_UPDATE)
+            addAction("com.example.fanfanlok.SCREENSHOT_FOR_HELPER")
         }
         registerReceiver(detectionStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         Log.d(TAG, "Detection state receiver registered")
@@ -232,6 +438,12 @@ class OverlayService : Service() {
     private fun showDetection() {
         if (isShowingDetection) {
             Log.d(TAG, "Detection already showing")
+            return
+        }
+
+        // Don't allow detection show during helper mode
+        if (isHelperModeActive) {
+            Toast.makeText(this, "❌ Exit helper mode first", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -284,7 +496,7 @@ class OverlayService : Service() {
         }
 
         Log.d(TAG, "Updating detection overlay with ${currentDetectedCards.size} cards")
-        
+
         // Debug: Log each card position
         currentDetectedCards.forEachIndexed { index, card ->
             Log.d(TAG, "Card $index: (${card.position.x}, ${card.position.y}) ${card.position.width}x${card.position.height}")
@@ -295,7 +507,7 @@ class OverlayService : Service() {
 
         if (currentDetectedCards.isNotEmpty()) {
             Log.d(TAG, "Creating detection overlay view...")
-            
+
             try {
                 // Create new detection overlay
                 detectionOverlay = DetectionOverlayView(this, currentDetectedCards)
@@ -320,10 +532,10 @@ class OverlayService : Service() {
 
                 windowManager.addView(detectionOverlay, params)
                 Log.d(TAG, "Detection overlay added successfully with ${currentDetectedCards.size} cards")
-                
+
                 // Force a redraw
                 detectionOverlay?.invalidate()
-                
+
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to add detection overlay", e)
                 Toast.makeText(this, "❌ Failed to show overlay: ${e.message}", Toast.LENGTH_LONG).show()
@@ -351,6 +563,12 @@ class OverlayService : Service() {
     }
 
     private fun toggleDetection() {
+        // Don't allow detection during helper mode
+        if (isHelperModeActive) {
+            Toast.makeText(this, "❌ Exit helper mode first", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         Log.d(TAG, "toggleDetection called, current state: $isDetectionRunning")
         if (!isDetectionRunning) {
             startDetection()
@@ -404,18 +622,21 @@ class OverlayService : Service() {
     }
 
     private fun updateDetectionStats(detectionCount: Int) {
+        val helperStats = manualCardHelper.getHelperStats()
+
         val statsText = """
             Detections: $detectionCount
             Cards Found: ${currentDetectedCards.size}
             Showing: ${if (isShowingDetection) "Yes" else "No"}
+            Helper Cards: ${helperStats.totalCards}
         """.trimIndent()
 
         tvStats.text = statsText
-        Log.d(TAG, "Updated detection stats: count=$detectionCount, cards=${currentDetectedCards.size}")
+        Log.d(TAG, "Updated detection stats: count=$detectionCount, cards=${currentDetectedCards.size}, helper=${helperStats.totalCards}")
     }
 
     private fun updateUI() {
-        Log.d(TAG, "updateUI called, detection running: $isDetectionRunning, showing detection: $isShowingDetection")
+        Log.d(TAG, "updateUI called, detection: $isDetectionRunning, showing: $isShowingDetection, helper: $isHelperModeActive")
 
         // Update toggle button
         btnToggle.text = if (isDetectionRunning) "⏹️ STOP" else "▶️ START"
@@ -425,13 +646,26 @@ class OverlayService : Service() {
             else
                 android.graphics.Color.parseColor("#4ECDC4") // Green for start
         )
+        btnToggle.isEnabled = !isHelperModeActive // Disable during helper mode
 
         // Update show/hide buttons
-        btnShow.visibility = if (isShowingDetection) View.GONE else View.VISIBLE
-        btnHide.visibility = if (isShowingDetection) View.VISIBLE else View.GONE
+        btnShow.visibility = if (isShowingDetection || isHelperModeActive) View.GONE else View.VISIBLE
+        btnHide.visibility = if (isShowingDetection && !isHelperModeActive) View.VISIBLE else View.GONE
+        btnShow.isEnabled = !isHelperModeActive
+        btnHide.isEnabled = !isHelperModeActive
+
+        // Update helper button
+        btnHelper.text = if (isHelperModeActive) "✅ SAVE" else "🎯 HELPER"
+        btnHelper.setBackgroundColor(
+            if (isHelperModeActive)
+                android.graphics.Color.parseColor("#4CAF50") // Green for save
+            else
+                android.graphics.Color.parseColor("#9C27B0") // Purple for helper
+        )
 
         // Update status text
         tvStatus.text = when {
+            isHelperModeActive -> "🎯 HELPER MODE - ${manualCardHelper.getCardCount()} cards"
             isDetectionRunning && isShowingDetection -> "🔍👁️ DETECTING + SHOWING"
             isDetectionRunning -> "🔍 DETECTING..."
             isShowingDetection -> "👁️ SHOWING OVERLAY"
@@ -441,19 +675,26 @@ class OverlayService : Service() {
         // Set status text color
         tvStatus.setTextColor(
             when {
+                isHelperModeActive -> android.graphics.Color.parseColor("#9C27B0") // Purple
                 isDetectionRunning -> android.graphics.Color.parseColor("#4CAF50") // Green
                 isShowingDetection -> android.graphics.Color.parseColor("#2196F3") // Blue
                 else -> android.graphics.Color.parseColor("#9E9E9E") // Gray
             }
         )
 
-        Log.d(TAG, "UI updated - button text: ${btnToggle.text}, status: ${tvStatus.text}")
+        Log.d(TAG, "UI updated - toggle: ${btnToggle.text}, helper: ${btnHelper.text}, status: ${tvStatus.text}")
     }
 
     override fun onDestroy() {
         Log.d(TAG, "OverlayService onDestroy")
 
+        // Stop helper mode if active
+        if (isHelperModeActive) {
+            manualCardHelper.stopHelperMode(savePositions = true)
+        }
+
         hideDetection() // Clean up detection overlay
+        hideCardPositionOverlay() // Clean up helper overlay
 
         try {
             unregisterReceiver(detectionStateReceiver)
