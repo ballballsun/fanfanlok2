@@ -236,25 +236,35 @@ class OverlayService : Service() {
         }
 
         isShowingDetection = true
-        Log.d(TAG, "showDetection() called - requesting current detection")
+        Log.d(TAG, "showDetection() called - current cards: ${currentDetectedCards.size}")
 
-        // Request current detection from ScreenCaptureService
-        val intent = Intent("com.example.fanfanlok.REQUEST_DETECTION")
-        sendBroadcast(intent)
-        Log.d(TAG, "Sent REQUEST_DETECTION broadcast")
-        Toast.makeText(this, "🔍 Requesting current card detection...", Toast.LENGTH_SHORT).show()
+        // If we already have detected cards, show them immediately
+        if (currentDetectedCards.isNotEmpty()) {
+            Log.d(TAG, "Using existing detection data: ${currentDetectedCards.size} cards")
+            updateDetectionOverlay()
+            Toast.makeText(this, "✅ Showing ${currentDetectedCards.size} detected cards", Toast.LENGTH_SHORT).show()
+        } else {
+            Log.d(TAG, "No existing data, requesting current detection")
+            // Request current detection from ScreenCaptureService
+            val intent = Intent("com.example.fanfanlok.REQUEST_DETECTION")
+            sendBroadcast(intent)
+            Log.d(TAG, "Sent REQUEST_DETECTION broadcast")
+            Toast.makeText(this, "🔍 Requesting current card detection...", Toast.LENGTH_SHORT).show()
 
-        // Set a timeout to show status after 2 seconds
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (currentDetectedCards.isEmpty()) {
-                Log.w(TAG, "No detection results received after 2 seconds")
-                Toast.makeText(this, "⚠️ No detection results received", Toast.LENGTH_LONG).show()
-                // Keep isShowingDetection true in case results arrive later
-            } else {
-                Log.d(TAG, "Detection results received: ${currentDetectedCards.size} cards")
-                Toast.makeText(this, "✅ Showing ${currentDetectedCards.size} detected cards", Toast.LENGTH_SHORT).show()
-            }
-        }, 2000)
+            // Set a timeout to check status after 2 seconds
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (currentDetectedCards.isEmpty()) {
+                    Log.w(TAG, "No detection results received after 2 seconds")
+                    Toast.makeText(this, "⚠️ No detection results received - try starting detection first", Toast.LENGTH_LONG).show()
+                    isShowingDetection = false // Reset state if no results
+                } else {
+                    Log.d(TAG, "Detection results received: ${currentDetectedCards.size} cards")
+                    updateDetectionOverlay()
+                    Toast.makeText(this, "✅ Showing ${currentDetectedCards.size} detected cards", Toast.LENGTH_SHORT).show()
+                }
+                updateUI()
+            }, 2000)
+        }
 
         updateUI()
     }
@@ -274,38 +284,57 @@ class OverlayService : Service() {
         }
 
         Log.d(TAG, "Updating detection overlay with ${currentDetectedCards.size} cards")
+        
+        // Debug: Log each card position
+        currentDetectedCards.forEachIndexed { index, card ->
+            Log.d(TAG, "Card $index: (${card.position.x}, ${card.position.y}) ${card.position.width}x${card.position.height}")
+        }
 
-        // Remove existing overlay
+        // Remove existing overlay first
         removeDetectionOverlay()
 
         if (currentDetectedCards.isNotEmpty()) {
             Log.d(TAG, "Creating detection overlay view...")
-            // Create new detection overlay
-            detectionOverlay = DetectionOverlayView(this, currentDetectedCards)
-
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else
-                    WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT
-            )
-
+            
             try {
+                // Create new detection overlay
+                detectionOverlay = DetectionOverlayView(this, currentDetectedCards)
+
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                    else
+                        WindowManager.LayoutParams.TYPE_PHONE,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT
+                )
+
+                // Set position to cover entire screen
+                params.gravity = Gravity.TOP or Gravity.START
+                params.x = 0
+                params.y = 0
+
                 windowManager.addView(detectionOverlay, params)
                 Log.d(TAG, "Detection overlay added successfully with ${currentDetectedCards.size} cards")
-                Toast.makeText(this, "✅ Showing ${currentDetectedCards.size} rectangles", Toast.LENGTH_SHORT).show()
+                
+                // Force a redraw
+                detectionOverlay?.invalidate()
+                
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to add detection overlay", e)
                 Toast.makeText(this, "❌ Failed to show overlay: ${e.message}", Toast.LENGTH_LONG).show()
+                isShowingDetection = false
+                updateUI()
             }
         } else {
             Log.w(TAG, "No cards to display in overlay")
+            Toast.makeText(this, "⚠️ No cards detected to display", Toast.LENGTH_SHORT).show()
+            isShowingDetection = false
+            updateUI()
         }
     }
 
@@ -455,35 +484,67 @@ class OverlayService : Service() {
             color = Color.RED
             style = Paint.Style.STROKE
             strokeWidth = 8f
-            alpha = 220 // Semi-transparent
+            isAntiAlias = true
         }
 
         private val fillPaint = Paint().apply {
             color = Color.RED
             style = Paint.Style.FILL
-            alpha = 30 // Very transparent fill
+            alpha = 60 // More visible fill
+        }
+
+        init {
+            // Make sure the view is visible and will draw
+            setWillNotDraw(false)
+            Log.d(TAG, "DetectionOverlayView created with ${detectedCards.size} cards")
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
 
-            Log.d(TAG, "Drawing ${detectedCards.size} detection rectangles")
+            Log.d(TAG, "onDraw called - drawing ${detectedCards.size} rectangles")
 
-            detectedCards.forEach { card ->
+            // Draw a test rectangle to verify drawing works
+            paint.color = Color.GREEN
+            canvas.drawRect(100f, 100f, 300f, 200f, paint)
+            Log.d(TAG, "Drew test rectangle")
+
+            // Reset paint color
+            paint.color = Color.RED
+
+            detectedCards.forEachIndexed { index, card ->
                 val rect = card.position
                 val left = rect.x.toFloat()
                 val top = rect.y.toFloat()
                 val right = (rect.x + rect.width).toFloat()
                 val bottom = (rect.y + rect.height).toFloat()
 
-                // Draw semi-transparent fill
-                canvas.drawRect(left, top, right, bottom, fillPaint)
+                Log.d(TAG, "Drawing card $index: rect($left, $top, $right, $bottom)")
 
-                // Draw border
-                canvas.drawRect(left, top, right, bottom, paint)
+                try {
+                    // Draw semi-transparent fill
+                    canvas.drawRect(left, top, right, bottom, fillPaint)
 
-                Log.v(TAG, "Drew rectangle at (${rect.x}, ${rect.y}) ${rect.width}x${rect.height}")
+                    // Draw border
+                    canvas.drawRect(left, top, right, bottom, paint)
+
+                    Log.d(TAG, "Successfully drew card $index rectangle")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error drawing card $index rectangle", e)
+                }
             }
+
+            Log.d(TAG, "onDraw completed - drew ${detectedCards.size} card rectangles")
+        }
+
+        override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+            super.onLayout(changed, left, top, right, bottom)
+            Log.d(TAG, "onLayout: changed=$changed, bounds=($left, $top, $right, $bottom)")
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+            Log.d(TAG, "onMeasure: width=${MeasureSpec.getSize(widthMeasureSpec)}, height=${MeasureSpec.getSize(heightMeasureSpec)}")
         }
     }
 }
