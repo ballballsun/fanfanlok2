@@ -1,37 +1,4 @@
-private fun initializeHelperComponents() {
-    helperSettings = HelperSettings(this)
-    manualCardHelper = ManualCardHelper(this)
-
-    // Set up helper mode listener
-    manualCardHelper.setOnHelperModeChangedListener { isActive ->
-        isHelperModeActive = isActive
-        updateUI()
-
-        if (isActive) {
-            showCardPositionOverlay()
-        } else {
-            hideCardPositionOverlay()
-        }
-    }
-
-    // Set up screenshot request listener
-    manualCardHelper.setOnScreenshotRequestListener {
-        requestScreenshotForEdgeDetection()
-    }
-
-    Log.d(TAG, "Helper components initialized")
-}
-
-private fun requestScreenshotForEdgeDetection() {
-    Log.d(TAG, "Requesting screenshot for edge detection")
-
-    // Request screenshot from ScreenCaptureService
-    val intent = Intent("com.example.fanfanlok.REQUEST_SCREENSHOT_FOR_HELPER")
-    sendBroadcast(intent)
-
-    // Show user feedback
-    Toast.makeText(this, "📸 Capturing screen for card detection...", Toast.LENGTH_SHORT).show()
-}package com.example.fanfanlok
+package com.example.fanfanlok
 
 import android.app.Service
 import android.content.BroadcastReceiver
